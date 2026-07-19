@@ -1,0 +1,17 @@
+[Unit]
+Description=AICOACH coaching brain (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/aicoach/aicoach-service
+EnvironmentFile=/opt/aicoach/aicoach-service/.env
+ExecStart=/opt/aicoach/aicoach-service/.venv/bin/python -m uvicorn service:app --host 127.0.0.1 --port 8091 --log-level warning
+Restart=always
+RestartSec=3
+# личные данные — не читаемы прочим
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

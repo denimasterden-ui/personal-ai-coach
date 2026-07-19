@@ -1,0 +1,17 @@
+[Unit]
+Description=AICOACH Telegram bot (long-polling, voice via Groq STT)
+After=aicoach-service.service network-online.target
+Wants=network-online.target
+Requires=aicoach-service.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/aicoach/aicoach-service
+EnvironmentFile=/opt/aicoach/aicoach-service/.env
+ExecStart=/opt/aicoach/aicoach-service/.venv/bin/python -u bot.py
+Restart=always
+RestartSec=3
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
