@@ -1,0 +1,18 @@
+[Unit]
+Description=AICOACH public demo — Telegram bot (open to all, PUBLIC_MODE)
+After=aicoach-demo-service.service network-online.target
+Wants=network-online.target
+Requires=aicoach-demo-service.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/aicoach-demo/aicoach-service
+EnvironmentFile=/opt/aicoach-demo/aicoach-service/.env
+Environment=AICOACH_URL=http://127.0.0.1:8092
+ExecStart=/opt/aicoach-demo/aicoach-service/.venv/bin/python -u bot.py
+Restart=always
+RestartSec=3
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

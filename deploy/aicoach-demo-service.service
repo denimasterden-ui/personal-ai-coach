@@ -1,0 +1,16 @@
+[Unit]
+Description=AICOACH public demo — coaching brain (FastAPI, PUBLIC_MODE)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/aicoach-demo/aicoach-service
+EnvironmentFile=/opt/aicoach-demo/aicoach-service/.env
+ExecStart=/opt/aicoach-demo/aicoach-service/.venv/bin/python -m uvicorn service:app --host 127.0.0.1 --port 8092 --log-level warning
+Restart=always
+RestartSec=3
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

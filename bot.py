@@ -37,6 +37,16 @@ DAILY_MESSAGE_LIMIT = int(os.environ.get("DAILY_MESSAGE_LIMIT", "30"))
 if PUBLIC_MODE and not TENANT_SALT:
     raise SystemExit("PUBLIC_MODE=true requires TENANT_SALT (random string) set in .env")
 
+# The operator's own chat, if this instance is shared with public users (dogfooding
+# the same deployment instead of running a second one): exempt from the daily cap,
+# and optionally routed to a better/pricier model than the public default.
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "").strip()
+ADMIN_MODEL = os.environ.get("ADMIN_MODEL", "").strip() or None
+
+
+def _is_admin(chat_id: int) -> bool:
+    return bool(ADMIN_CHAT_ID) and str(chat_id) == ADMIN_CHAT_ID
+
 
 def _tenant_id_for(chat_id: int) -> str:
     """Private mode: one shared TENANT_ID (as before). Public mode: each chat
@@ -54,7 +64,7 @@ _daily_count: dict[int, tuple[int, int]] = {}  # chat_id -> (day_number, count)
 
 
 def _rate_limited(chat_id: int) -> bool:
-    if not PUBLIC_MODE:
+    if not PUBLIC_MODE or _is_admin(chat_id):
         return False
     day = int(time.time() // 86400)
     d, n = _daily_count.get(chat_id, (day, 0))
@@ -90,13 +100,14 @@ async def _tg(client, method, **params):
     return r.json()
 
 
-async def _ask_brain(client, tenant_id, session_id, text) -> str:
+async def _ask_brain(client, tenant_id, session_id, text, model=None) -> str:
     """POST /session, consume the SSE stream, return the final answer text."""
     answer = ""
+    payload = {"tenant_id": tenant_id, "session_id": session_id, "message": text}
+    if model:
+        payload["model"] = model
     async with client.stream(
-        "POST", f"{AICOACH_URL}/session",
-        json={"tenant_id": tenant_id, "session_id": session_id, "message": text},
-        timeout=180,
+        "POST", f"{AICOACH_URL}/session", json=payload, timeout=180,
     ) as resp:
         event = None
         async for line in resp.aiter_lines():
@@ -142,9 +153,10 @@ async def _flush(client, chat_id):
     if len(text) > LONG_INPUT_CHARS:
         await _tg(client, "sendMessage", chat_id=chat_id,
                   text="Принял, обрабатываю — большой объём, это займёт пару минут…")
+    model = ADMIN_MODEL if _is_admin(chat_id) else None
     ka = asyncio.create_task(_typing_keepalive(client, chat_id))
     try:
-        answer = await _ask_brain(client, _tenant_id_for(chat_id), f"tg-{chat_id}", text)
+        answer = await _ask_brain(client, _tenant_id_for(chat_id), f"tg-{chat_id}", text, model=model)
     finally:
         ka.cancel()
     await _tg(client, "sendMessage", chat_id=chat_id, text=answer)
@@ -196,7 +208,7 @@ async def _handle(client, msg):
         text = msg["text"]
         if text.startswith("/start"):
             greeting = "Привет. Пиши или наговаривай, что происходит — разберём."
-            if PUBLIC_MODE:
+            if PUBLIC_MODE and not _is_admin(chat_id):
                 greeting += (
                     f"\n\nЭто публичное демо. Лимит: {DAILY_MESSAGE_LIMIT} сообщений/день. "
                     "Память хранится изолированно и зашифрована на сервере, но для полной "
