@@ -26,6 +26,7 @@ multi-user deployment. Skills (shared, non-personal) are never encrypted.
 import asyncio
 import logging
 import re
+import shutil
 from datetime import datetime, timezone
 
 import config
@@ -169,6 +170,84 @@ async def recall(tenant_id, query, limit=5):
     except Exception as exc:
         log.warning("recall(%r) failed: %s", query, exc)
         return []
+
+
+# ── user-facing memory ops (bot commands: /memory, /export, /delete_my_data) ──
+
+def _one(d, name):
+    p = d / name
+    if not p.exists():
+        return ""
+    try:
+        text = _read_text(p)
+    except Exception as exc:
+        log.warning("read %s failed: %s", p, exc)
+        return ""
+    # drop the internal "_updated: ..." footers for the human-facing /memory view
+    return re.sub(r"\n*_updated: [^\n]*_\n*", "\n\n", text).strip()
+
+
+def _summarize_sync(tenant_id):
+    """'/memory': a human-facing view of what the coach currently holds — the
+    stable self, open threads, and counts of the rest. Not the raw file dump
+    (that's /export)."""
+    d = _tenant_dir(tenant_id)
+    parts = []
+    s = _one(d, "self.md")
+    if s:
+        parts.append(s)
+    loops = _one(d, "open_loops.md")
+    if loops:
+        parts.append("## Открытые темы\n\n" + loops)
+    counts = []
+    for sub, label in (("patterns", "паттернов"), ("decisions", "решений"), ("sessions", "сессий")):
+        sd = d / sub
+        n = sum(1 for _ in sd.glob("*.md")) if sd.is_dir() else 0
+        if n:
+            counts.append(f"{n} {label}")
+    if counts:
+        parts.append("_Также сохранено: " + ", ".join(counts) + "._")
+    return "\n\n".join(parts)
+
+
+async def summarize(tenant_id):
+    return await asyncio.to_thread(_summarize_sync, tenant_id)
+
+
+def _export_sync(tenant_id):
+    """'/export': all of a tenant's memory .md (decrypted) as one portable
+    markdown document — the user's own data, theirs to take."""
+    d = _tenant_dir(tenant_id)
+    chunks = []
+    for p in sorted(_iter_md(d)):
+        try:
+            text = _read_text(p)
+        except Exception as exc:
+            log.warning("export: unreadable %s: %s", p, exc)
+            continue
+        chunks.append(f"# {p.relative_to(d)}\n\n{text.strip()}\n")
+    return "\n\n".join(chunks)
+
+
+async def export_tenant(tenant_id):
+    return await asyncio.to_thread(_export_sync, tenant_id)
+
+
+def _delete_sync(tenant_id):
+    d = _tenant_dir(tenant_id)
+    if d.exists():
+        shutil.rmtree(d)
+        return True
+    return False
+
+
+async def delete_tenant(tenant_id):
+    """'/delete_my_data': remove the tenant's entire memory dir. Irreversible."""
+    try:
+        return await asyncio.to_thread(_delete_sync, tenant_id)
+    except Exception as exc:
+        log.warning("delete_tenant(%s) failed: %s", tenant_id, exc)
+        return False
 
 
 # ── skills (shared optics/methods; reused from ops-agent SKILL.md pattern) ────
