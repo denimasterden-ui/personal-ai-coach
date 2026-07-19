@@ -1,5 +1,5 @@
-"""File-based, tenant-scoped memory for AICOACH — all .md, human-readable and
-git-diffable (per Denis: memory lives in editable .md files). No Neo4j.
+"""File-based, tenant-scoped memory for AICOACH — .md by default, human-readable
+and git-diffable (per Denis: memory lives in editable .md files). No Neo4j.
 
 Isolation (R1) lives HERE, inside the tools, not in a pipe: every path is
 resolved and asserted to stay inside tenants/<tenant_id>/, so the model's
@@ -11,6 +11,16 @@ left to accumulate contradictory facts next to the new one.
 Memory types (§6 of TZ) map to files under the tenant dir:
   self.md · patterns/<slug>.md · coach/<slug>.md · open_loops.md ·
   evidence.md · decisions/<slug>.md · sessions/<slug>.md
+
+Encryption at rest (optional, off by default): if config.MEMORY_ENCRYPTION_KEY
+is set, tenant memory files are written/read as Fernet ciphertext instead of
+plaintext. Honest threat model — this protects against someone who gets a copy
+of tenants/ without the server's .env (a stolen disk, a leaked backup), NOT
+against the server operator (who holds the key alongside the data). True
+"not even the operator can read it" needs a per-user passphrase-derived key,
+which is a separate, not-yet-built mode. Leave the key unset for a private
+self-hosted instance you want to stay human-editable; set it for a public/
+multi-user deployment. Skills (shared, non-personal) are never encrypted.
 """
 
 import asyncio
@@ -21,6 +31,24 @@ from datetime import datetime, timezone
 import config
 
 log = logging.getLogger("aicoach.memory")
+
+_fernet = None
+if config.MEMORY_ENCRYPTION_KEY:
+    from cryptography.fernet import Fernet
+    _fernet = Fernet(config.MEMORY_ENCRYPTION_KEY.encode())
+
+
+def _write_text(path, text: str) -> None:
+    data = text.encode("utf-8")
+    path.write_bytes(_fernet.encrypt(data) if _fernet else data)
+
+
+def _read_text(path) -> str:
+    data = path.read_bytes()
+    if _fernet:
+        data = _fernet.decrypt(data)
+    return data.decode("utf-8")
+
 
 # Single-file types (append/replace a whole file) vs per-entry types (one file
 # per slug in a subdir). Keeps the model's `type` argument small and explicit.
@@ -73,13 +101,13 @@ def _write_sync(tenant_id, mem_type, slug, content, supersedes, mode):
     # mode="replace" rewrites it whole. per-entry types are one file per slug —
     # a save just replaces that slug's file, mode doesn't apply.
     if mem_type in _SINGLE_FILE and mode == "append" and path.exists():
-        existing = path.read_text(encoding="utf-8").rstrip()
+        existing = _read_text(path).rstrip()
         body = f"{existing}\n\n---\n\n{new}\n\n_updated: {stamp}_\n"
         action = "appended"
     else:
         body = f"{new}\n\n_updated: {stamp}_\n"
         action = "replaced" if mem_type in _SINGLE_FILE else "saved"
-    path.write_text(body, encoding="utf-8")
+    _write_text(path, body)
     # curator: drop superseded per-entry files
     removed = []
     for stale in supersedes or []:
@@ -119,8 +147,9 @@ def _recall_sync(tenant_id, query, limit):
     scored = []
     for p in _iter_md(d):
         try:
-            text = p.read_text(encoding="utf-8")
-        except OSError:
+            text = _read_text(p)
+        except Exception as exc:  # incl. cryptography.fernet.InvalidToken (wrong/missing key)
+            log.warning("recall: unreadable %s: %s", p, exc)
             continue
         hay = text.lower()
         score = sum(hay.count(t) for t in tokens) if tokens else 0

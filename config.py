@@ -25,3 +25,9 @@ TENANTS_DIR = Path(os.environ.get("TENANTS_DIR", str(BASE_DIR / "tenants")))
 # Shared skills (schools/methods) — NOT tenant-scoped: the coaching optics are
 # common. Tenant-specific coach adaptations live under the tenant dir instead.
 SKILLS_DIR = Path(os.environ.get("SKILLS_DIR", str(BASE_DIR / "skills")))
+
+# Optional Fernet key (base64, `Fernet.generate_key()`) — encrypts tenant memory
+# at rest when set. See memory.py module docstring for the honest threat model
+# (protects a leaked backup/disk, not the operator holding this same key).
+# Empty = plaintext .md, as before (default — keeps a private instance editable).
+MEMORY_ENCRYPTION_KEY = os.environ.get("MEMORY_ENCRYPTION_KEY", "")

@@ -1,17 +1,25 @@
-"""AICOACH Telegram bot (M2) — private, single-user.
+"""AICOACH Telegram bot — two modes.
 
-Long-polling (no public URL needed; works from the phone while the Mac is on).
-Handles text and voice: voice → ffmpeg → whisper.cpp (Metal) → text → POST
-/session (the coaching brain) → stream answer back.
+Private (default, PUBLIC_MODE unset): strict chat_id whitelist, single shared
+TENANT_ID. Until ALLOWED_CHAT_ID is set, the bot refuses everyone and just
+tells you your chat_id, so nobody else's messages ever reach the brain or the
+personal profile.
 
-Privacy (R1/R2): a strict chat_id whitelist. Until ALLOWED_CHAT_ID is set, the
-bot refuses everyone and just tells you your chat_id, so nobody else's messages
-ever reach the coaching brain or the personal profile.
+Public demo (PUBLIC_MODE=true): open to any Telegram user, no whitelist. Each
+chat gets its own memory, keyed by a salted hash of its chat_id (not the raw
+id) — see memory.py's docstring for the honest threat model this buys. A
+simple per-day message cap guards the operator's LLM budget from abuse, since
+every message is a real API call on the operator's key.
+
+Long-polling (no public URL needed). Handles text and voice: voice → Groq
+whisper-large-v3 → text → POST /session (the coaching brain) → stream answer.
 """
 
 import asyncio
+import hashlib
 import json
 import os
+import time
 
 import httpx
 
@@ -21,6 +29,40 @@ FILE_API = f"https://api.telegram.org/file/bot{TOKEN}"
 AICOACH_URL = os.environ.get("AICOACH_URL", "http://127.0.0.1:8091")
 TENANT_ID = os.environ.get("TENANT_ID", "default")
 ALLOWED_CHAT_ID = os.environ.get("ALLOWED_CHAT_ID", "").strip()
+
+PUBLIC_MODE = os.environ.get("PUBLIC_MODE", "false").strip().lower() == "true"
+TENANT_SALT = os.environ.get("TENANT_SALT", "")
+DAILY_MESSAGE_LIMIT = int(os.environ.get("DAILY_MESSAGE_LIMIT", "30"))
+
+if PUBLIC_MODE and not TENANT_SALT:
+    raise SystemExit("PUBLIC_MODE=true requires TENANT_SALT (random string) set in .env")
+
+
+def _tenant_id_for(chat_id: int) -> str:
+    """Private mode: one shared TENANT_ID (as before). Public mode: each chat
+    gets its own tenant, named by a salted hash of chat_id rather than the raw
+    id, so a directory listing of tenants/ doesn't read as a Telegram roster."""
+    if not PUBLIC_MODE:
+        return TENANT_ID
+    return hashlib.sha256(f"{TENANT_SALT}:{chat_id}".encode()).hexdigest()[:24]
+
+
+# Per-day message cap per chat, public mode only — caps worst-case API cost
+# from a single abusive/looping user. In-memory (resets on restart), fine for
+# a soft guard; not meant as a hard security boundary.
+_daily_count: dict[int, tuple[int, int]] = {}  # chat_id -> (day_number, count)
+
+
+def _rate_limited(chat_id: int) -> bool:
+    if not PUBLIC_MODE:
+        return False
+    day = int(time.time() // 86400)
+    d, n = _daily_count.get(chat_id, (day, 0))
+    if d != day:
+        d, n = day, 0
+    n += 1
+    _daily_count[chat_id] = (d, n)
+    return n > DAILY_MESSAGE_LIMIT
 
 # STT via Groq (whisper-large-v3): fast on a GPU-less VPS. Groq accepts the
 # Telegram .oga (ogg/opus) directly, so no ffmpeg step. Trade-off (accepted):
@@ -48,12 +90,12 @@ async def _tg(client, method, **params):
     return r.json()
 
 
-async def _ask_brain(client, chat_id, session_id, text) -> str:
+async def _ask_brain(client, tenant_id, session_id, text) -> str:
     """POST /session, consume the SSE stream, return the final answer text."""
     answer = ""
     async with client.stream(
         "POST", f"{AICOACH_URL}/session",
-        json={"tenant_id": TENANT_ID, "session_id": session_id, "message": text},
+        json={"tenant_id": tenant_id, "session_id": session_id, "message": text},
         timeout=180,
     ) as resp:
         event = None
@@ -102,7 +144,7 @@ async def _flush(client, chat_id):
                   text="Принял, обрабатываю — большой объём, это займёт пару минут…")
     ka = asyncio.create_task(_typing_keepalive(client, chat_id))
     try:
-        answer = await _ask_brain(client, chat_id, f"tg-{chat_id}", text)
+        answer = await _ask_brain(client, _tenant_id_for(chat_id), f"tg-{chat_id}", text)
     finally:
         ka.cancel()
     await _tg(client, "sendMessage", chat_id=chat_id, text=answer)
@@ -122,13 +164,19 @@ async def _handle(client, msg):
     kind = "voice" if ("voice" in msg or "audio" in msg) else ("text" if "text" in msg else "other")
     print(f"[msg] chat={chat_id} kind={kind}", flush=True)
 
-    if not ALLOWED_CHAT_ID:
-        await _tg(client, "sendMessage", chat_id=chat_id,
-                  text=f"Твой chat_id: {chat_id}\nДобавь его в ALLOWED_CHAT_ID и перезапусти бота.")
-        return
-    if str(chat_id) != ALLOWED_CHAT_ID:
-        await _tg(client, "sendMessage", chat_id=chat_id, text="Нет доступа.")
-        return
+    if PUBLIC_MODE:
+        if _rate_limited(chat_id):
+            await _tg(client, "sendMessage", chat_id=chat_id,
+                      text=f"Дневной лимит сообщений ({DAILY_MESSAGE_LIMIT}) исчерпан — приходи завтра.")
+            return
+    else:
+        if not ALLOWED_CHAT_ID:
+            await _tg(client, "sendMessage", chat_id=chat_id,
+                      text=f"Твой chat_id: {chat_id}\nДобавь его в ALLOWED_CHAT_ID и перезапусти бота.")
+            return
+        if str(chat_id) != ALLOWED_CHAT_ID:
+            await _tg(client, "sendMessage", chat_id=chat_id, text="Нет доступа.")
+            return
 
     if "voice" in msg or "audio" in msg:
         await _tg(client, "sendChatAction", chat_id=chat_id, action="typing")
@@ -147,15 +195,23 @@ async def _handle(client, msg):
     elif "text" in msg:
         text = msg["text"]
         if text.startswith("/start"):
-            await _tg(client, "sendMessage", chat_id=chat_id,
-                      text="Привет. Пиши или наговаривай, что происходит — разберём.")
+            greeting = "Привет. Пиши или наговаривай, что происходит — разберём."
+            if PUBLIC_MODE:
+                greeting += (
+                    f"\n\nЭто публичное демо. Лимит: {DAILY_MESSAGE_LIMIT} сообщений/день. "
+                    "Память хранится изолированно и зашифрована на сервере, но для полной "
+                    "приватности разверни свой инстанс: github.com/denimasterden-ui/personal-ai-coach"
+                )
+            await _tg(client, "sendMessage", chat_id=chat_id, text=greeting)
             return
         _buffer(client, chat_id, text)
 
 
 async def main():
     offset = None
-    print(f"AICOACH bot up. whitelist={'set' if ALLOWED_CHAT_ID else 'OPEN (reveals chat_id)'}")
+    mode = f"PUBLIC (hashed tenants, {DAILY_MESSAGE_LIMIT}/day cap)" if PUBLIC_MODE else (
+        "private, whitelist=set" if ALLOWED_CHAT_ID else "private, whitelist=OPEN (reveals chat_id)")
+    print(f"AICOACH bot up. mode={mode}")
     async with httpx.AsyncClient() as client:
         while True:
             try:
