@@ -206,7 +206,11 @@ def _summarize_sync(tenant_id):
         if n:
             counts.append(f"{n} {label}")
     if counts:
-        parts.append("_Также сохранено: " + ", ".join(counts) + "._")
+        lead = "Также сохранено" if parts else "Сохранено"
+        parts.append(f"_{lead}: " + ", ".join(counts) + "._")
+    if not parts:
+        return ("Пока я почти ничего о тебе не записал — профиль наполняется по мере "
+                "разговора. Расскажи, что происходит, и я начну складывать картину.")
     return "\n\n".join(parts)
 
 

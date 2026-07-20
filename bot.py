@@ -157,7 +157,7 @@ async def _transcribe(client, audio: bytes) -> str:
     r = await client.post(
         "https://api.groq.com/openai/v1/audio/transcriptions",
         headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-        files={"file": ("voice.oga", audio, "audio/ogg")},
+        files={"file": ("voice.ogg", audio, "audio/ogg")},
         data={"model": GROQ_STT_MODEL, "language": "ru"},
         timeout=60,
     )
@@ -315,16 +315,23 @@ async def _command(client, chat_id, text):
         else:
             await _send_document(client, chat_id, "aicoach-memory.md", dump)
     elif cmd == "/delete_my_data":
-        if arg == "confirm":
-            ok = await memory.delete_tenant(tenant)
-            if _subs.pop(str(chat_id), None) is not None:
-                _save_subs()
-            await _tg(client, "sendMessage", chat_id=chat_id,
-                      text="Готово — вся твоя память удалена." if ok else "Данных и так не было.")
-        else:
-            await _tg(client, "sendMessage", chat_id=chat_id,
-                      text="Это удалит ВСЮ память о тебе безвозвратно. Сначала можешь "
-                           "забрать её через /export.\n\nЧтобы подтвердить: /delete_my_data confirm")
+        # Telegram auto-links /commands in message text, so /delete_confirm below
+        # renders as a single tappable confirmation — no typed argument needed.
+        await _tg(client, "sendMessage", chat_id=chat_id,
+                  text="Это удалит ВСЮ память о тебе безвозвратно. Сначала можешь "
+                       "забрать её через /export.\n\nЧтобы подтвердить — нажми /delete_confirm")
+    elif cmd == "/delete_confirm":
+        ok = await memory.delete_tenant(tenant)
+        # also drop the live in-RAM conversation in the service, else the coach
+        # keeps "remembering" from session context (and may re-save) until TTL.
+        try:
+            await client.delete(f"{AICOACH_URL}/session/tg-{chat_id}", timeout=10)
+        except Exception as exc:
+            print("[delete] session reset failed:", exc, flush=True)
+        if _subs.pop(str(chat_id), None) is not None:
+            _save_subs()
+        await _tg(client, "sendMessage", chat_id=chat_id,
+                  text="Готово — вся твоя память удалена." if ok else "Данных и так не было.")
     elif cmd == "/weekly":
         if arg == "on":
             _subs[str(chat_id)] = time.time()
@@ -343,6 +350,22 @@ async def _command(client, chat_id, text):
     else:
         await _tg(client, "sendMessage", chat_id=chat_id,
                   text="Неизвестная команда. /start — список команд.")
+
+
+# Registered with Telegram so typing "/" shows a command menu. /delete_confirm is
+# deliberately omitted — it's only reachable via the /delete_my_data warning, so it
+# can't be tapped straight from the menu and wipe data by accident.
+_COMMANDS = [
+    {"command": "start", "description": "О боте и список команд"},
+    {"command": "memory", "description": "Что я о тебе понял"},
+    {"command": "export", "description": "Забрать свою память файлом .md"},
+    {"command": "weekly", "description": "Еженедельное напоминание вернуться к рефлексии"},
+    {"command": "delete_my_data", "description": "Стереть всё о тебе"},
+]
+
+
+async def _set_commands(client):
+    await _tg(client, "setMyCommands", commands=_COMMANDS)
 
 
 async def _handle(client, msg):
@@ -365,6 +388,10 @@ async def _handle(client, msg):
             return
 
     if "voice" in msg or "audio" in msg:
+        if not GROQ_API_KEY:
+            await _tg(client, "sendMessage", chat_id=chat_id,
+                      text="🎙 Голосовые на этом боте пока не поддержаны — напиши, пожалуйста, текстом.")
+            return
         await _tg(client, "sendChatAction", chat_id=chat_id, action="typing")
         file_id = (msg.get("voice") or msg.get("audio"))["file_id"]
         info = await _tg(client, "getFile", file_id=file_id)
@@ -393,6 +420,7 @@ async def main():
     _load_subs()
     print(f"AICOACH bot up. mode={mode}, weekly_subs={len(_subs)}")
     async with httpx.AsyncClient() as client:
+        await _set_commands(client)
         asyncio.create_task(_weekly_loop(client))
         while True:
             try:

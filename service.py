@@ -184,6 +184,15 @@ async def health():
     return {"status": "ok"}
 
 
+@app.delete("/session/{session_id}")
+async def drop_session(session_id: str):
+    """Forget a session's in-RAM conversation. The bot calls this on
+    /delete_my_data so a wipe clears live context too — otherwise the coach
+    keeps 'remembering' the user (and could re-save) from session history
+    until TTL, even though the on-disk .md files are already gone."""
+    return {"dropped": _sessions.pop(session_id, None) is not None}
+
+
 # Minimal same-origin dev chat — lets Denis exercise разборы текстом in a browser
 # before the TG voice handler (M2) exists. Not a product UI, just a probe.
 _CHAT_HTML = """<!doctype html><html lang=ru><meta charset=utf-8>
@@ -199,7 +208,7 @@ _CHAT_HTML = """<!doctype html><html lang=ru><meta charset=utf-8>
  button{margin-top:8px;padding:10px 18px;border:0;border-radius:10px;background:#2563eb;color:#fff;font:inherit;cursor:pointer}
  button:disabled{opacity:.5}
 </style>
-<h2>AICOACH — dev chat <span class=meta>tenant: denis</span></h2>
+<h2>AICOACH — dev chat <span class=meta>tenant: default</span></h2>
 <div id=log></div>
 <textarea id=inp rows=3 placeholder="Напиши, что происходит…"></textarea><br>
 <button id=send>Отправить</button>
@@ -211,7 +220,7 @@ async function ask(){
  const msg=inp.value.trim();if(!msg)return;inp.value='';send.disabled=true;
  add('u','Ты: '+msg);
  const r=await fetch('/session',{method:'POST',headers:{'Content-Type':'application/json'},
-   body:JSON.stringify({tenant_id:'denis',session_id:sid,message:msg})});
+   body:JSON.stringify({tenant_id:'default',session_id:sid,message:msg})});
  const rd=r.body.getReader(),dec=new TextDecoder();let buf='';
  for(;;){const{value,done}=await rd.read();if(done)break;buf+=dec.decode(value,{stream:true});
   let i;while((i=buf.indexOf('\\n\\n'))>=0){const blk=buf.slice(0,i);buf=buf.slice(i+2);
