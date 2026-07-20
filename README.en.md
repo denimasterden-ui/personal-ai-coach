@@ -64,6 +64,9 @@ A smarter model isn't the point: you can run the very same Claude or GPT as the 
 What matters is the **harness around the model**. A raw chat hands you a brilliant stranger every
 time — AICOACH gives you a method and a memory.
 
+> 📊 **Which model to pick** for quality vs cost — [a live A/B on a real case](docs/model-comparison.md):
+> glm-5.2 reaches GPT-level at roughly 10× less.
+
 | Raw ChatGPT / Claude | AICOACH |
 |---|---|
 | Vendor memory: shallow, cloud-bound, opaque | Your profile is `.md` files: read them, edit by hand, export, delete |
