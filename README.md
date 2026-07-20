@@ -1,5 +1,7 @@
 # AICOACH
 
+**Русский** · [English](README.en.md)
+
 **Личный AI-коуч с приватной памятью — интегративный, self-hosted, модель-агностичный.**
 _A private, self-hosted, model-agnostic personal AI coach that actually remembers you._
 
