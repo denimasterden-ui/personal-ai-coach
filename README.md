@@ -9,6 +9,8 @@ _A private, self-hosted, model-agnostic personal AI coach that actually remember
 
 ## ▶️ Попробовать за 30 секунд
 
+![AICOACH — пример разбора в Telegram](assets/demo.svg)
+
 **[→ @ai_coach_integrated_bot](https://t.me/ai_coach_integrated_bot)** — живой демо-бот в Telegram.
 Напишите ему, что сейчас занимает или тревожит, — и получите разбор. `/start` — что это и как
 устроено, `/memory` — что бот о вас понял, `/export` — забрать свою память, `/delete_my_data` —
@@ -113,6 +115,10 @@ set -a; . ./.env; set +a
 MVP: голос/текст, интегративный разбор, растущий профиль, изоляция, деплой 24/7.
 Дальше: обезличивание/шифрование памяти at-rest для публичного развёртывания, мультиюзер,
 опциональный веб-доступ модели. См. issues.
+
+## Вклад
+
+PR и issues приветствуются — точки входа, карта кода и стиль в [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Лицензия
 
