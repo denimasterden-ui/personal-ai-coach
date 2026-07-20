@@ -2,6 +2,8 @@
 
 [Русский](README.md) · **English**
 
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md) [![Telegram — try the bot](https://img.shields.io/badge/Telegram-try%20the%20bot-2CA5E0?logo=telegram&logoColor=white)](https://t.me/ai_coach_integrated_bot)
+
 **A private, self-hosted, model-agnostic personal AI coach that actually remembers you.**
 
 Daily reflections on states, decisions, inner conflicts, and recurring patterns — grounded in
@@ -38,8 +40,8 @@ has:
 - **Integrative approach** — 12 schools (IFS, ACT, CBT, schema therapy, attachment theory,
   Motivational Interviewing, Immunity to Change, AQAL, Systems Thinking, Behavior Design, emotion
   regulation, experiential learning). The model picks 1–3 lenses per request.
-- **Transparent profile memory** — not a vendor's vector DB, but plain `.md` files on your side.
-  You can open them, read them, and **edit your profile by hand**.
+- **Transparent profile memory** — plain `.md` files on your side. No vendor-side vector database:
+  you can open them, read them, and **edit your profile by hand**.
 - **Model-agnostic** — any OpenAI-compatible endpoint: Claude/DeepSeek/Qwen/Llama via OpenRouter,
   your own LiteLLM, or a local Ollama. Which one to pick — see the
   [model comparison](docs/model-comparison.md) (quality/cost/latency on a real case).
@@ -49,11 +51,18 @@ has:
 Philosophy: the goal isn't to maximize productivity, but to **widen your freedom of choice** — more
 clarity, less inner war, one honest next step.
 
+## Who it's for
+
+- **People who want to understand themselves** — regular self-reflection, without booking a
+  specialist and without handing your life to someone else's cloud.
+- **Working coaches** — encode your own method as a skill and drop it into the repo: the bot runs
+  the conversation on your frame, not a generic one.
+
 ## Why not just ChatGPT / Claude?
 
-Honestly: it's not that the model is smarter — you can run the very same Claude or GPT as the brain
-of AICOACH. The difference is the **harness around the model**. A raw chat hands you a brilliant
-stranger every time; AICOACH gives you a method and a memory.
+A smarter model isn't the point: you can run the very same Claude or GPT as the brain of AICOACH.
+What matters is the **harness around the model**. A raw chat hands you a brilliant stranger every
+time — AICOACH gives you a method and a memory.
 
 | Raw ChatGPT / Claude | AICOACH |
 |---|---|
@@ -66,13 +75,13 @@ stranger every time; AICOACH gives you a method and a memory.
 | Locked to one vendor and its price | Model-agnostic: pick quality/cost ([GPT-level ~10× cheaper](docs/model-comparison.md)) |
 | One more browser tab | Voice + Telegram — where you already are |
 
-Bottom line: a paid chat is a general-purpose tool. AICOACH is a purpose-built loop for regular work
-on yourself — with a memory you own and a frame that doesn't just nod along.
+A paid chat is a general-purpose tool. AICOACH is a purpose-built loop for regular work on
+yourself — a memory you own and a frame that doesn't just nod along.
 
 ## Architecture
 
-Not a rigid pipeline, but a "bare brain" with a skill and tools to its own memory — the model
-decides for itself when to recall and when to write:
+A "bare brain" with a skill and tools to its own memory: the model decides for itself when to
+recall and when to write:
 
 ```
 [voice/text from Telegram] → (STT) →
@@ -119,7 +128,7 @@ Your first message to the bot returns your `chat_id` — put it in `ALLOWED_CHAT
 ### Public demo mode (`PUBLIC_MODE=true`)
 
 Opens the bot to everyone on Telegram — see [deploy/env.demo.example](deploy/env.demo.example). What
-it gives you, and what it honestly does not:
+it gives you — and what it does not:
 
 - **`tenant_id` = salt + hash(chat_id)** — the on-disk profile directory isn't labeled with your
   Telegram ID directly.
