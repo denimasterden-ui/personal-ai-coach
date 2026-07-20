@@ -7,8 +7,9 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/aicoach-demo/aicoach-service
 EnvironmentFile=/opt/aicoach-demo/aicoach-service/.env
-ExecStart=/opt/aicoach-demo/aicoach-service/.venv/bin/python -m uvicorn service:app --host 127.0.0.1 --port 8092 --log-level warning
+ExecStart=/opt/aicoach-demo/aicoach-service/.venv/bin/python -m uvicorn service:app --host 127.0.0.1 --port 8092 --log-level warning --timeout-graceful-shutdown 90
 Restart=always
+TimeoutStopSec=90
 RestartSec=3
 UMask=0077
 

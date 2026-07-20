@@ -7,3 +7,6 @@ subscribers.json
 backups
 backups/
 *.pyc
+
+# in-RAM conversations persisted across restarts (contains chat text)
+sessions.pkl

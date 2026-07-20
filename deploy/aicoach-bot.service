@@ -10,6 +10,7 @@ WorkingDirectory=/opt/aicoach/aicoach-service
 EnvironmentFile=/opt/aicoach/aicoach-service/.env
 ExecStart=/opt/aicoach/aicoach-service/.venv/bin/python -u bot.py
 Restart=always
+TimeoutStopSec=90
 RestartSec=3
 UMask=0077
 

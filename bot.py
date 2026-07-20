@@ -19,6 +19,7 @@ import asyncio
 import hashlib
 import json
 import os
+import signal
 import time
 from pathlib import Path
 
@@ -216,6 +217,11 @@ async def _ask_brain(client, tenant_id, session_id, text, model=None) -> str:
 DEBOUNCE_SEC = float(os.environ.get("DEBOUNCE_SEC", "4"))
 _pending: dict[int, dict] = {}
 
+# In-flight turns (debounce + brain call). On SIGTERM we stop taking new
+# updates and await these so a deploy never kills a разбор mid-answer.
+_inflight: set[asyncio.Task] = set()
+DRAIN_TIMEOUT = float(os.environ.get("DRAIN_TIMEOUT", "85"))  # < systemd TimeoutStopSec
+
 
 LONG_INPUT_CHARS = 2000
 
@@ -248,6 +254,13 @@ async def _flush(client, chat_id):
     ka = asyncio.create_task(_typing_keepalive(client, chat_id))
     try:
         answer = await _ask_brain(client, _tenant_id_for(chat_id), f"tg-{chat_id}", text, model=model)
+    except Exception as exc:
+        # brain unreachable (e.g. mid-deploy restart) — don't leave the user in silence
+        print("[flush] brain error:", exc, flush=True)
+        await _send_text(client, chat_id,
+                         "Секунду — я на пару мгновений обновился. Повтори, пожалуйста, "
+                         "последнее сообщение, я на месте.")
+        return
     finally:
         ka.cancel()
     await _send_text(client, chat_id, answer)
@@ -259,7 +272,10 @@ def _buffer(client, chat_id, text):
     entry["parts"].append(text)
     if entry["task"]:
         entry["task"].cancel()
-    entry["task"] = asyncio.create_task(_flush(client, chat_id))
+    task = asyncio.create_task(_flush(client, chat_id))
+    entry["task"] = task
+    _inflight.add(task)
+    task.add_done_callback(_inflight.discard)
 
 
 def _onboarding(chat_id: int) -> str:
@@ -419,12 +435,29 @@ async def main():
         "private, whitelist=set" if ALLOWED_CHAT_ID else "private, whitelist=OPEN (reveals chat_id)")
     _load_subs()
     print(f"AICOACH bot up. mode={mode}, weekly_subs={len(_subs)}")
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:
+            pass
+
     async with httpx.AsyncClient() as client:
         await _set_commands(client)
         asyncio.create_task(_weekly_loop(client))
-        while True:
+        while not stop.is_set():
+            # race the long-poll against SIGTERM so shutdown is prompt
+            poll = asyncio.ensure_future(_tg(client, "getUpdates", offset=offset, timeout=25))
+            stopw = asyncio.ensure_future(stop.wait())
+            await asyncio.wait({poll, stopw}, return_when=asyncio.FIRST_COMPLETED)
+            if stop.is_set():
+                poll.cancel()
+                break
+            stopw.cancel()
             try:
-                upd = await _tg(client, "getUpdates", offset=offset, timeout=25)
+                upd = poll.result()
             except Exception as exc:
                 print("getUpdates error:", exc)
                 await asyncio.sleep(3)
@@ -437,6 +470,11 @@ async def main():
                         await _handle(client, msg)
                     except Exception as exc:
                         print("handle error:", exc)
+
+        print(f"[shutdown] draining {len(_inflight)} in-flight turn(s)…", flush=True)
+        if _inflight:
+            await asyncio.wait(set(_inflight), timeout=DRAIN_TIMEOUT)
+        print("[shutdown] done", flush=True)
 
 
 if __name__ == "__main__":

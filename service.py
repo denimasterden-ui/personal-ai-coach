@@ -10,7 +10,10 @@ the Neo4j session persistence, and the dashboard/browser-link endpoints.
 
 import asyncio
 import json
+import os
+import pickle
 import time
+from pathlib import Path
 
 import tiktoken
 from fastapi import FastAPI
@@ -54,12 +57,60 @@ class _Session:
 
 
 _sessions: dict[str, _Session] = {}
+_active = 0  # in-flight /session turns (model requests) — deploy gate reads this
 
 
 def _evict_stale():
     now = time.time()
     for sid in [s for s, v in _sessions.items() if now - v.last_used > SESSION_TTL_SECONDS]:
         del _sessions[sid]
+
+
+# Persist live conversations across restarts so a deploy doesn't wipe the
+# in-RAM context of anyone mid-разбор. Encrypted at rest with the same key as
+# memory when running the public demo (the dump holds conversation text).
+SESSIONS_FILE = Path(os.environ.get("SESSIONS_FILE", "sessions.pkl"))
+_sess_fernet = None
+_enc_key = os.environ.get("MEMORY_ENCRYPTION_KEY")
+if _enc_key:
+    from cryptography.fernet import Fernet
+    _sess_fernet = Fernet(_enc_key.encode())
+
+
+def _persist_sessions():
+    _evict_stale()
+    try:
+        data = pickle.dumps(_sessions)
+        if _sess_fernet:
+            data = _sess_fernet.encrypt(data)
+        SESSIONS_FILE.write_bytes(data)
+        print(f"[sessions] persisted {len(_sessions)}", flush=True)
+    except Exception as exc:
+        print("[sessions] persist error:", exc, flush=True)
+
+
+def _restore_sessions():
+    if not SESSIONS_FILE.exists():
+        return
+    try:
+        data = SESSIONS_FILE.read_bytes()
+        if _sess_fernet:
+            data = _sess_fernet.decrypt(data)
+        _sessions.update(pickle.loads(data))
+        _evict_stale()
+        print(f"[sessions] restored {len(_sessions)}", flush=True)
+    except Exception as exc:
+        print("[sessions] restore error:", exc, flush=True)
+
+
+@app.on_event("startup")
+async def _on_startup():
+    _restore_sessions()
+
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    _persist_sessions()
 
 
 def _sse(event, data):
@@ -104,6 +155,18 @@ async def _build_system_prompt():
 
 
 async def _run(req: SessionRequest):
+    """Thin wrapper: count the turn as an in-flight model request so a deploy
+    can wait for a quiet window (active == 0) before restarting."""
+    global _active
+    _active += 1
+    try:
+        async for chunk in _run_inner(req):
+            yield chunk
+    finally:
+        _active -= 1
+
+
+async def _run_inner(req: SessionRequest):
     model_id = req.model or config.LLM_MODEL
     _evict_stale()
     session = _sessions.get(req.session_id) if req.session_id else None
@@ -181,7 +244,7 @@ async def session(req: SessionRequest):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "active": _active, "sessions": len(_sessions)}
 
 
 @app.delete("/session/{session_id}")

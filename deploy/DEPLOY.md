@@ -45,6 +45,16 @@
    journalctl -u aicoach-bot -f
    ```
 
+## Обновление без обрыва разговоров
+Рестарты сделаны «мягкими»: юниты ждут до `TimeoutStopSec=90`, бот доигрывает разборы в
+полёте (graceful drain), а сервис пиклит живые сессии в `sessions.pkl` и поднимает их обратно —
+контекст диалога переживает рестарт. Чтобы вообще не влезать в активный запрос, деплойте в тихое
+окно: `/health` возвращает `{"active": N}` — число идущих обращений к модели. Ждите `active=0`:
+```
+until [ "$(curl -s 127.0.0.1:8092/health | python3 -c 'import sys,json;print(json.load(sys.stdin)["active"])')" = 0 ]; do sleep 3; done
+systemctl restart aicoach-demo-service aicoach-demo-bot
+```
+
 ## Откат
 ```
 systemctl disable --now aicoach-bot aicoach-service
