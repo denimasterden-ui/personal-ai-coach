@@ -13,3 +13,7 @@ sessions.pkl
 
 # deploy target config (server IP, key path)
 deploy/deploy.env
+
+# engagement analytics (hashed tenant, no message content — still local-only)
+analytics.db
+analytics.db-*

@@ -25,6 +25,7 @@ from pathlib import Path
 
 import httpx
 
+import analytics  # engagement analytics — hashed tenant, no message content
 import memory  # direct file-level access for /memory, /export, /delete_my_data
                # (same TENANTS_DIR + encryption as the service; no HTTP hop needed)
 
@@ -77,7 +78,10 @@ def _rate_limited(chat_id: int) -> bool:
         d, n = day, 0
     n += 1
     _daily_count[chat_id] = (d, n)
-    return n > DAILY_MESSAGE_LIMIT
+    limited = n > DAILY_MESSAGE_LIMIT
+    if limited:
+        analytics.log("rate_limited", _tenant_id_for(chat_id))
+    return limited
 
 
 # ── weekly opt-in nudge ───────────────────────────────────────────────────────
@@ -136,9 +140,11 @@ async def _weekly_loop(client):
                 r = await _tg(client, "sendMessage", chat_id=int(cid), text=WEEKLY_NUDGE)
                 if r.get("ok"):
                     _subs[cid] = now
+                    analytics.log("weekly_push", _tenant_id_for(int(cid)))
                     print(f"[weekly] pushed to {cid}", flush=True)
                 elif not r.get("ok") and r.get("error_code") == 403:
                     _subs.pop(cid, None)  # user blocked the bot — drop them
+                    analytics.log("blocked", _tenant_id_for(int(cid)))
                     print(f"[weekly] {cid} blocked bot, unsubscribed", flush=True)
             if due:
                 _save_subs()
@@ -193,7 +199,9 @@ async def _send_text(client, chat_id, text, **kw):
 
 
 async def _ask_brain(client, tenant_id, session_id, text, model=None) -> str:
-    """POST /session, consume the SSE stream, return the final answer text."""
+    """POST /session, consume the SSE stream, return the final answer text.
+    Also logs a memory_write analytics event per save_memory tool call — a
+    cheap proxy for "the coach actually learned something this turn"."""
     answer = ""
     payload = {"tenant_id": tenant_id, "session_id": session_id, "message": text}
     if model:
@@ -205,8 +213,13 @@ async def _ask_brain(client, tenant_id, session_id, text, model=None) -> str:
         async for line in resp.aiter_lines():
             if line.startswith("event: "):
                 event = line[7:]
-            elif line.startswith("data: ") and event == "answer":
-                answer = json.loads(line[6:]).get("text", "")
+            elif line.startswith("data: "):
+                data = json.loads(line[6:])
+                if event == "answer":
+                    answer = data.get("text", "")
+                elif event == "tool_call" and data.get("name") == "save_memory":
+                    mtype = (data.get("args") or {}).get("type")
+                    analytics.log("memory_write", tenant_id, mtype=mtype)
     return answer or "(пустой ответ)"
 
 
@@ -246,14 +259,16 @@ async def _flush(client, chat_id):
     if not entry or not entry["parts"]:
         return
     text = "\n\n".join(entry["parts"])
+    tenant = _tenant_id_for(chat_id)
     print(f"[flush] chat={chat_id} parts={len(entry['parts'])} chars={len(text)}", flush=True)
+    analytics.log("message", tenant, kind="voice" if entry["voice"] else "text")
     if len(text) > LONG_INPUT_CHARS:
         await _tg(client, "sendMessage", chat_id=chat_id,
                   text="Принял, обрабатываю — большой объём, это займёт пару минут…")
     model = ADMIN_MODEL if _is_admin(chat_id) else None
     ka = asyncio.create_task(_typing_keepalive(client, chat_id))
     try:
-        answer = await _ask_brain(client, _tenant_id_for(chat_id), f"tg-{chat_id}", text, model=model)
+        answer = await _ask_brain(client, tenant, f"tg-{chat_id}", text, model=model)
     except Exception as exc:
         # brain unreachable (e.g. mid-deploy restart) — don't leave the user in silence
         print("[flush] brain error:", exc, flush=True)
@@ -264,12 +279,14 @@ async def _flush(client, chat_id):
     finally:
         ka.cancel()
     await _send_text(client, chat_id, answer)
+    analytics.log("answer", tenant)
     print(f"[answer] sent {len(answer)} chars", flush=True)
 
 
-def _buffer(client, chat_id, text):
-    entry = _pending.setdefault(chat_id, {"parts": [], "task": None})
+def _buffer(client, chat_id, text, kind="text"):
+    entry = _pending.setdefault(chat_id, {"parts": [], "task": None, "voice": False})
     entry["parts"].append(text)
+    entry["voice"] = entry["voice"] or kind == "voice"
     if entry["task"]:
         entry["task"].cancel()
     task = asyncio.create_task(_flush(client, chat_id))
@@ -318,6 +335,13 @@ async def _command(client, chat_id, text):
     cmd, arg = cmd.lower(), arg.strip().lower()
     tenant = _tenant_id_for(chat_id)
 
+    if not analytics.has_seen(tenant):
+        # deep-link attribution: t.me/<bot>?start=reddit → "/start reddit" is
+        # always the very first message Telegram sends, so real /start carries
+        # the source; anyone who starts by typing something else gets "direct".
+        analytics.log("first_seen", tenant, source=arg if cmd == "/start" else "")
+    analytics.log("command", tenant, cmd=cmd)
+
     if cmd == "/start":
         await _tg(client, "sendMessage", chat_id=chat_id, text=_onboarding(chat_id))
     elif cmd == "/memory":
@@ -346,23 +370,29 @@ async def _command(client, chat_id, text):
             print("[delete] session reset failed:", exc, flush=True)
         if _subs.pop(str(chat_id), None) is not None:
             _save_subs()
+        analytics.log("deleted", tenant)
         await _tg(client, "sendMessage", chat_id=chat_id,
                   text="Готово — вся твоя память удалена." if ok else "Данных и так не было.")
     elif cmd == "/weekly":
         if arg == "on":
             _subs[str(chat_id)] = time.time()
             _save_subs()
+            analytics.log("weekly_on", tenant)
             await _tg(client, "sendMessage", chat_id=chat_id,
                       text="Включил. Через неделю напомню вернуться к рефлексии. Отключить — /weekly off")
         elif arg == "off":
             if _subs.pop(str(chat_id), None) is not None:
                 _save_subs()
+            analytics.log("weekly_off", tenant)
             await _tg(client, "sendMessage", chat_id=chat_id, text="Напоминания отключены.")
         else:
             on = str(chat_id) in _subs
             await _tg(client, "sendMessage", chat_id=chat_id,
                       text=f"Еженедельные напоминания: {'включены' if on else 'выключены'}.\n"
                            "Включить — /weekly on · Выключить — /weekly off")
+    elif cmd == "/stats" and _is_admin(chat_id):
+        days = int(arg) if arg.isdigit() else 30
+        await _send_text(client, chat_id, analytics.format_summary(analytics.summary(days)))
     else:
         await _tg(client, "sendMessage", chat_id=chat_id,
                   text="Неизвестная команда. /start — список команд.")
@@ -420,12 +450,16 @@ async def _handle(client, msg):
             return
         # echo recognition immediately (feedback), buffer for the joined turn
         await _tg(client, "sendMessage", chat_id=chat_id, text=f"🎙 _{text}_", parse_mode="Markdown")
-        _buffer(client, chat_id, text)
+        if not analytics.has_seen(_tenant_id_for(chat_id)):
+            analytics.log("first_seen", _tenant_id_for(chat_id), source="")
+        _buffer(client, chat_id, text, kind="voice")
     elif "text" in msg:
         text = msg["text"]
         if text.startswith("/"):
             await _command(client, chat_id, text)
             return
+        if not analytics.has_seen(_tenant_id_for(chat_id)):
+            analytics.log("first_seen", _tenant_id_for(chat_id), source="")
         _buffer(client, chat_id, text)
 
 
@@ -434,6 +468,7 @@ async def main():
     mode = f"PUBLIC (hashed tenants, {DAILY_MESSAGE_LIMIT}/day cap)" if PUBLIC_MODE else (
         "private, whitelist=set" if ALLOWED_CHAT_ID else "private, whitelist=OPEN (reveals chat_id)")
     _load_subs()
+    analytics.init()
     print(f"AICOACH bot up. mode={mode}, weekly_subs={len(_subs)}")
 
     stop = asyncio.Event()
