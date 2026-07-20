@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="740" height="660" viewBox="0 0 740 660" font-family="-apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif">
+  <defs>
+    <linearGradient id="wall" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#c9d6e5"/>
+      <stop offset="1" stop-color="#b3c4d8"/>
+    </linearGradient>
+    <filter id="sh" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-color="#000" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+
+  <!-- card -->
+  <rect x="0" y="0" width="740" height="660" rx="18" fill="url(#wall)"/>
+
+  <!-- header -->
+  <rect x="0" y="0" width="740" height="64" rx="18" fill="#517da2"/>
+  <rect x="0" y="30" width="740" height="34" fill="#517da2"/>
+  <circle cx="44" cy="32" r="20" fill="#3f6688"/>
+  <text x="44" y="38" text-anchor="middle" font-size="19" fill="#dfeaf3">🧭</text>
+  <text x="76" y="28" font-size="17" font-weight="600" fill="#ffffff">AI integrated coach</text>
+  <text x="76" y="47" font-size="13" fill="#c9dced">integrative coach · profile memory</text>
+
+  <!-- user bubble (right) -->
+  <g filter="url(#sh)">
+    <rect x="230" y="88" width="486" height="72" rx="14" fill="#eaffd6"/>
+  </g>
+  <text font-size="15.5" fill="#1a2733">
+    <tspan x="250" y="115">I can't get myself to start an important project —</tspan>
+    <tspan x="250" y="138">I put it off every day, then hate myself at night.</tspan>
+  </text>
+  <text x="700" y="153" text-anchor="end" font-size="11" fill="#6f9c5a">09:41 ✓✓</text>
+
+  <!-- coach bubble (left) -->
+  <g filter="url(#sh)">
+    <rect x="24" y="176" width="612" height="356" rx="14" fill="#ffffff"/>
+  </g>
+  <text font-size="15.5" fill="#1a2733">
+    <tspan x="44" y="206" font-weight="600">Looks like a loop: put it off → evening shame →</tspan>
+    <tspan x="44" y="228" font-weight="600">less energy to start. This isn't laziness.</tspan>
+
+    <tspan x="44" y="262">Three possible mechanisms:</tspan>
+    <tspan x="44" y="288">• <tspan fill="#517da2" font-weight="600">The task isn't broken down</tspan> — the mind avoids</tspan>
+    <tspan x="60" y="308">it as a threat. <tspan fill="#8a97a3" font-size="13">(Behavior Design + ACT)</tspan></tspan>
+    <tspan x="44" y="334">• A hidden <tspan fill="#517da2" font-weight="600">“commitment not to start”</tspan> —</tspan>
+    <tspan x="60" y="354">procrastination as protection. <tspan fill="#8a97a3" font-size="13">(Immunity to Change)</tspan></tspan>
+    <tspan x="44" y="380">• <tspan fill="#517da2" font-weight="600">Depletion</tspan>, and “forcing yourself” only drains you.</tspan>
+    <tspan x="60" y="400"><tspan fill="#8a97a3" font-size="13">(window of tolerance + IFS)</tspan></tspan>
+
+    <tspan x="44" y="436" font-weight="600">A 24h experiment:</tspan>
+    <tspan x="44" y="460">write down one first step, ≤ 15 min, concrete. Do</tspan>
+    <tspan x="44" y="480">only that. In the evening, one note instead of anger:</tspan>
+    <tspan x="44" y="500">was it harder to <tspan font-style="italic">do</tspan> the step or to <tspan font-style="italic">start</tspan> it?</tspan>
+  </text>
+  <text x="616" y="518" text-anchor="end" font-size="11" fill="#9aa7b3">09:41</text>
+
+  <!-- memory chip -->
+  <g filter="url(#sh)">
+    <rect x="24" y="552" width="692" height="84" rx="14" fill="#f4f7fb"/>
+  </g>
+  <text x="44" y="580" font-size="13.5" font-weight="600" fill="#517da2">🧠 /memory — what the bot remembered</text>
+  <text font-size="13.5" fill="#41505e">
+    <tspan x="44" y="604">Pattern: procrastinates big tasks, breezes through small ones.</tspan>
+    <tspan x="44" y="624">Open thread: entry threshold vs discipline — being tested by the experiment.</tspan>
+  </text>
+</svg>
