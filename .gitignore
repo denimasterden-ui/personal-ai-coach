@@ -10,3 +10,6 @@ backups/
 
 # in-RAM conversations persisted across restarts (contains chat text)
 sessions.pkl
+
+# deploy target config (server IP, key path)
+deploy/deploy.env
