@@ -31,3 +31,9 @@ SKILLS_DIR = Path(os.environ.get("SKILLS_DIR", str(BASE_DIR / "skills")))
 # (protects a leaked backup/disk, not the operator holding this same key).
 # Empty = plaintext .md, as before (default — keeps a private instance editable).
 MEMORY_ENCRYPTION_KEY = os.environ.get("MEMORY_ENCRYPTION_KEY", "")
+
+# Reasoning effort for reasoning-capable models (OpenRouter `reasoning.effort`:
+# "low"/"medium"/"high"). Empty = don't send it (model's own default). Heavy
+# reasoners (e.g. kimi-k3) otherwise burn the whole max_tokens budget on hidden
+# reasoning — starving the answer and blowing latency — so cap it here.
+REASONING_EFFORT = os.environ.get("REASONING_EFFORT", "")

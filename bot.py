@@ -172,6 +172,25 @@ async def _tg(client, method, **params):
     return r.json()
 
 
+TG_MAX = 4096  # Telegram's hard per-message limit; longer sends 400 and vanishes
+
+
+async def _send_text(client, chat_id, text, **kw):
+    """Split text over 4096 chars on line boundaries and send as several messages —
+    a rich /memory profile or a long coach answer would otherwise silently 400."""
+    if not text:
+        return
+    while text:
+        if len(text) <= TG_MAX:
+            chunk, text = text, ""
+        else:
+            cut = text.rfind("\n", 0, TG_MAX)
+            if cut < TG_MAX // 2:
+                cut = TG_MAX
+            chunk, text = text[:cut], text[cut:].lstrip("\n")
+        await _tg(client, "sendMessage", chat_id=chat_id, text=chunk, **kw)
+
+
 async def _ask_brain(client, tenant_id, session_id, text, model=None) -> str:
     """POST /session, consume the SSE stream, return the final answer text."""
     answer = ""
@@ -179,7 +198,7 @@ async def _ask_brain(client, tenant_id, session_id, text, model=None) -> str:
     if model:
         payload["model"] = model
     async with client.stream(
-        "POST", f"{AICOACH_URL}/session", json=payload, timeout=180,
+        "POST", f"{AICOACH_URL}/session", json=payload, timeout=300,
     ) as resp:
         event = None
         async for line in resp.aiter_lines():
@@ -231,7 +250,7 @@ async def _flush(client, chat_id):
         answer = await _ask_brain(client, _tenant_id_for(chat_id), f"tg-{chat_id}", text, model=model)
     finally:
         ka.cancel()
-    await _tg(client, "sendMessage", chat_id=chat_id, text=answer)
+    await _send_text(client, chat_id, answer)
     print(f"[answer] sent {len(answer)} chars", flush=True)
 
 
@@ -287,8 +306,8 @@ async def _command(client, chat_id, text):
         await _tg(client, "sendMessage", chat_id=chat_id, text=_onboarding(chat_id))
     elif cmd == "/memory":
         summary = await memory.summarize(tenant)
-        await _tg(client, "sendMessage", chat_id=chat_id,
-                  text=summary or "Пока пусто — расскажи о себе, и я начну запоминать.")
+        await _send_text(client, chat_id,
+                         summary or "Пока пусто — расскажи о себе, и я начну запоминать.")
     elif cmd == "/export":
         dump = await memory.export_tenant(tenant)
         if not dump:

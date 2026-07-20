@@ -25,7 +25,8 @@ _A private, self-hosted, model-agnostic personal AI coach that actually remember
 - **Прозрачная память профиля** — не векторная БД у вендора, а обычные `.md`-файлы у вас.
   Можно открыть, прочитать и **поправить профиль руками**.
 - **Модель-агностичность** — любой OpenAI-совместимый endpoint: Claude/DeepSeek/Qwen/Llama
-  через OpenRouter, свой LiteLLM или локальный Ollama.
+  через OpenRouter, свой LiteLLM или локальный Ollama. Какую выбрать — см.
+  [сравнение моделей](docs/model-comparison.md) (качество/цена/латентность на реальном кейсе).
 - **Self-host, приватность** — данные не покидают ваш сервер (кроме вызова выбранной модели).
 - **Голос** — надиктовка расшифровывается (Groq Whisper или локально).
 

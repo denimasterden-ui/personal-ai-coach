@@ -28,12 +28,14 @@ _client = AsyncOpenAI(base_url=config.LLM_BASE_URL, api_key=config.LLM_API_KEY)
 _enc = tiktoken.get_encoding("cl100k_base")
 
 MAX_STEPS = 6            # coaching needs a few memory tool-calls, not 24 data steps
-MAX_OUTPUT_TOKENS = 4000
+MAX_OUTPUT_TOKENS = 16000  # reasoning models share this budget with hidden reasoning
 SESSION_TTL_SECONDS = 6 * 3600
 PLAYBOOK_TITLE = "Integrative Personal Coaching v1"
 
 # OpenRouter: pin throughput so we don't scatter across slow providers.
 _EXTRA_BODY = {"provider": {"sort": "throughput"}}
+if config.REASONING_EFFORT:
+    _EXTRA_BODY["reasoning"] = {"effort": config.REASONING_EFFORT}
 
 
 class SessionRequest(BaseModel):
