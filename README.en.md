@@ -49,6 +49,24 @@ has:
 Philosophy: the goal isn't to maximize productivity, but to **widen your freedom of choice** — more
 clarity, less inner war, one honest next step.
 
+## Why not just ChatGPT / Claude?
+
+Honestly: it's not that the model is smarter — you can run the very same Claude or GPT as the brain
+of AICOACH. The difference is the **harness around the model**. A raw chat hands you a brilliant
+stranger every time; AICOACH gives you a method and a memory.
+
+| Raw ChatGPT / Claude | AICOACH |
+|---|---|
+| Vendor memory: shallow, cloud-bound, opaque | Your profile is `.md` files: read them, edit by hand, export, delete |
+| Defaults to agreeing and "rescuing" | A coaching method: 12 schools, non-rescuing, holds both/and, gives a next step |
+| A conversation transcript | A curator distills patterns/decisions/open threads across sessions |
+| Your confessions sit in a vendor's cloud on their terms | Self-host: data on your server; a local model — nothing leaves at all |
+| Locked to one vendor and its price | Model-agnostic: pick quality/cost ([GPT-level ~10× cheaper](docs/model-comparison.md)) |
+| One more browser tab | Voice + Telegram — where you already are |
+
+Bottom line: a paid chat is a general-purpose tool. AICOACH is a purpose-built loop for regular work
+on yourself — with a memory you own and a frame that doesn't just nod along.
+
 ## Architecture
 
 Not a rigid pipeline, but a "bare brain" with a skill and tools to its own memory — the model
