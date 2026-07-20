@@ -59,8 +59,10 @@ stranger every time; AICOACH gives you a method and a memory.
 |---|---|
 | Vendor memory: shallow, cloud-bound, opaque | Your profile is `.md` files: read them, edit by hand, export, delete |
 | Defaults to agreeing and "rescuing" | A coaching method: 12 schools, non-rescuing, holds both/and, gives a next step |
+| A long thread dilutes context, accuracy drifts | Memory is externalized to files + targeted `recall` + skills loaded on demand — the working context stays focused |
 | A conversation transcript | A curator distills patterns/decisions/open threads across sessions |
 | Your confessions sit in a vendor's cloud on their terms | Self-host: data on your server; a local model — nothing leaves at all |
+| Your chats can be used to train the model | Open-weight models (especially local): your reflections don't feed a vendor's training set |
 | Locked to one vendor and its price | Model-agnostic: pick quality/cost ([GPT-level ~10× cheaper](docs/model-comparison.md)) |
 | One more browser tab | Voice + Telegram — where you already are |
 
