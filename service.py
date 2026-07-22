@@ -224,8 +224,18 @@ async def _run_inner(req: SessionRequest):
                 "content": json.dumps(result, ensure_ascii=False, default=str),
             })
 
-    # step budget spent — force a final answer with no tools
-    messages.append({"role": "user", "content": "Заверши разбор ответом пользователю, без вызова инструментов."})
+    # Step budget spent while the model still wanted to call tools — a big/rich
+    # message (long voice transcript, multi-topic dump) can burn the budget on
+    # recall+save_memory before it gets to an actual reply. Rather than forcing
+    # a confident-sounding wrap-up (which reads as a rushed non-answer), tell
+    # the model to be honest about running out of room — and log it so we can
+    # see from real traffic (not a guess) whether MAX_STEPS needs raising.
+    print(f"[budget] MAX_STEPS={MAX_STEPS} exhausted mid-tool-calls, tenant={req.tenant_id}", flush=True)
+    messages.append({"role": "user", "content":
+        "У тебя закончился лимит действий на этот ход, а разбор не завершён. Не изображай "
+        "законченный ответ — прямо скажи человеку, что сообщение было большое/насыщенное и ты "
+        "не успел разобрать всё за один раз. Кратко резюмируй, что успел заметить, и предложи "
+        "продолжить (например: чтобы дописать самому в следующем сообщении, или разбить на части)."})
     final = await _client.chat.completions.create(
         model=model_id,
         messages=_with_cache_control(messages),
