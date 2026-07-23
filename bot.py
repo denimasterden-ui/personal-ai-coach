@@ -179,6 +179,16 @@ async def _tg(client, method, **params):
     return r.json()
 
 
+async def _react(client, chat_id, message_id, emoji="👀"):
+    """Put a reaction on an incoming message so the user sees it was read —
+    instant feedback even while the answer is still cooking. Best-effort."""
+    try:
+        await _tg(client, "setMessageReaction", chat_id=chat_id, message_id=message_id,
+                  reaction=[{"type": "emoji", "emoji": emoji}])
+    except Exception:
+        pass
+
+
 TG_MAX = 4096  # Telegram's hard per-message limit; longer sends 400 and vanishes
 
 
@@ -223,15 +233,19 @@ async def _ask_brain(client, tenant_id, session_id, text, model=None) -> str:
     return answer or "(пустой ответ)"
 
 
-# Debounce: a person often sends a long thought as several messages in a row.
-# Instead of answering each fragment, buffer incoming text per chat and only run
-# the brain once, DEBOUNCE_SEC after the last message — the fragments are joined
-# into one turn (which also means one save_memory pass, not one per fragment).
+# Per-chat serial worker (the "followup" queue pattern). A person often sends a
+# thought as several messages in a row — and may keep talking while the brain is
+# still answering the previous batch. One worker task per chat guarantees exactly
+# one brain call for that chat at a time: no two turns ever mutate the same
+# session concurrently (which used to interleave context and yield stub answers).
+# Messages that arrive mid-answer aren't dropped or run in parallel — they land
+# in the buffer and become the next turn, with the previous answer already in
+# context (so the coach builds on it, like a real conversation).
 DEBOUNCE_SEC = float(os.environ.get("DEBOUNCE_SEC", "4"))
-_pending: dict[int, dict] = {}
+_chat: dict[int, dict] = {}  # chat_id -> {"parts": [str], "voice": bool, "last": float, "worker": Task|None}
 
-# In-flight turns (debounce + brain call). On SIGTERM we stop taking new
-# updates and await these so a deploy never kills a разбор mid-answer.
+# In-flight per-chat workers. On SIGTERM we stop taking new updates and await
+# these so a deploy never kills a разбор mid-answer.
 _inflight: set[asyncio.Task] = set()
 DRAIN_TIMEOUT = float(os.environ.get("DRAIN_TIMEOUT", "85"))  # < systemd TimeoutStopSec
 
@@ -250,49 +264,52 @@ async def _typing_keepalive(client, chat_id):
         pass
 
 
-async def _flush(client, chat_id):
-    try:
-        await asyncio.sleep(DEBOUNCE_SEC)
-    except asyncio.CancelledError:
-        return
-    entry = _pending.pop(chat_id, None)
-    if not entry or not entry["parts"]:
-        return
-    text = "\n\n".join(entry["parts"])
-    tenant = _tenant_id_for(chat_id)
-    print(f"[flush] chat={chat_id} parts={len(entry['parts'])} chars={len(text)}", flush=True)
-    analytics.log("message", tenant, kind="voice" if entry["voice"] else "text")
-    if len(text) > LONG_INPUT_CHARS:
-        await _tg(client, "sendMessage", chat_id=chat_id,
-                  text="Принял, обрабатываю — большой объём, это займёт пару минут…")
-    model = ADMIN_MODEL if _is_admin(chat_id) else None
-    ka = asyncio.create_task(_typing_keepalive(client, chat_id))
-    try:
-        answer = await _ask_brain(client, tenant, f"tg-{chat_id}", text, model=model)
-    except Exception as exc:
-        # brain unreachable (e.g. mid-deploy restart) — don't leave the user in silence
-        print("[flush] brain error:", exc, flush=True)
-        await _send_text(client, chat_id,
-                         "Секунду — я на пару мгновений обновился. Повтори, пожалуйста, "
-                         "последнее сообщение, я на месте.")
-        return
-    finally:
-        ka.cancel()
-    await _send_text(client, chat_id, answer)
-    analytics.log("answer", tenant)
-    print(f"[answer] sent {len(answer)} chars", flush=True)
+async def _worker(client, chat_id):
+    """Drain a chat's buffer one turn at a time until it's empty. Loops so that
+    anything that arrives while a turn is being answered becomes the next turn."""
+    st = _chat[chat_id]
+    while st["parts"]:
+        # debounce: wait until DEBOUNCE_SEC of quiet since the last message, so a
+        # burst of fragments joins into one turn
+        while (gap := DEBOUNCE_SEC - (time.time() - st["last"])) > 0:
+            await asyncio.sleep(gap)
+        text = "\n\n".join(st["parts"]); st["parts"] = []
+        voice = st["voice"]; st["voice"] = False
+        tenant = _tenant_id_for(chat_id)
+        print(f"[flush] chat={chat_id} chars={len(text)}", flush=True)
+        analytics.log("message", tenant, kind="voice" if voice else "text")
+        if len(text) > LONG_INPUT_CHARS:
+            await _tg(client, "sendMessage", chat_id=chat_id,
+                      text="Принял, обрабатываю — большой объём, это займёт пару минут…")
+        model = ADMIN_MODEL if _is_admin(chat_id) else None
+        ka = asyncio.create_task(_typing_keepalive(client, chat_id))
+        try:
+            answer = await _ask_brain(client, tenant, f"tg-{chat_id}", text, model=model)
+        except Exception as exc:
+            # brain unreachable (e.g. mid-deploy restart) — don't leave the user in silence
+            print("[flush] brain error:", exc, flush=True)
+            await _send_text(client, chat_id,
+                             "Секунду — я на пару мгновений обновился. Повтори, пожалуйста, "
+                             "последнее сообщение, я на месте.")
+            continue
+        finally:
+            ka.cancel()
+        await _send_text(client, chat_id, answer)
+        analytics.log("answer", tenant)
+        print(f"[answer] sent {len(answer)} chars", flush=True)
 
 
 def _buffer(client, chat_id, text, kind="text"):
-    entry = _pending.setdefault(chat_id, {"parts": [], "task": None, "voice": False})
-    entry["parts"].append(text)
-    entry["voice"] = entry["voice"] or kind == "voice"
-    if entry["task"]:
-        entry["task"].cancel()
-    task = asyncio.create_task(_flush(client, chat_id))
-    entry["task"] = task
-    _inflight.add(task)
-    task.add_done_callback(_inflight.discard)
+    st = _chat.setdefault(chat_id, {"parts": [], "voice": False, "last": 0.0, "worker": None})
+    st["parts"].append(text)
+    st["voice"] = st["voice"] or kind == "voice"
+    st["last"] = time.time()
+    w = st["worker"]
+    if w is None or w.done():
+        w = asyncio.create_task(_worker(client, chat_id))
+        st["worker"] = w
+        _inflight.add(w)
+        w.add_done_callback(_inflight.discard)
 
 
 def _onboarding(chat_id: int) -> str:
@@ -438,6 +455,7 @@ async def _handle(client, msg):
             await _tg(client, "sendMessage", chat_id=chat_id,
                       text="🎙 Голосовые на этом боте пока не поддержаны — напиши, пожалуйста, текстом.")
             return
+        await _react(client, chat_id, msg["message_id"])  # 👀 «услышал, расшифровываю»
         await _tg(client, "sendChatAction", chat_id=chat_id, action="typing")
         file_id = (msg.get("voice") or msg.get("audio"))["file_id"]
         info = await _tg(client, "getFile", file_id=file_id)
@@ -458,6 +476,7 @@ async def _handle(client, msg):
         if text.startswith("/"):
             await _command(client, chat_id, text)
             return
+        await _react(client, chat_id, msg["message_id"])  # 👀 «прочитал»
         if not analytics.has_seen(_tenant_id_for(chat_id)):
             analytics.log("first_seen", _tenant_id_for(chat_id), source="")
         _buffer(client, chat_id, text)
