@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Offline supervision run — a senior model reviews captured разборы (ADR 0003).
 
-    ./supervise.py              # review pending cases (needs enough material)
-    ./supervise.py --force      # review even below the material threshold
-    ./supervise.py --stats      # just show what's accumulated
-    ./supervise.py -n 10        # cap how many cases to review this run
+    ./supervise.py                    # review pending cases (needs enough material)
+    ./supervise.py --stats            # show what's accumulated, per tenant
+    ./supervise.py --tenant <id>      # only this tenant's разборы
+    ./supervise.py --model <id>       # critic model (OpenRouter id); default Opus
+    ./supervise.py --force            # review even below the material threshold
+    ./supervise.py -n 10              # cap how many cases to review this run
 
 The critic judges each case against the *applied skill's own* «критерий
 качественного разбора», plus a thin cross-school layer (MITI partnership/empathy,
@@ -81,10 +83,10 @@ def _case_prompt(case):
     )
 
 
-async def _review(client, case):
+async def _review(client, case, model):
     system = RUBRIC.format(skill_criterion=_criterion(case["skill"]))
     resp = await client.chat.completions.create(
-        model=SUPERVISOR_MODEL,
+        model=model,
         messages=[{"role": "system", "content": system},
                   {"role": "user", "content": _case_prompt(case)}],
         max_tokens=4000,
@@ -96,6 +98,8 @@ async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--force", action="store_true", help="run below the material threshold")
     ap.add_argument("--stats", action="store_true", help="show accumulated material and exit")
+    ap.add_argument("--tenant", help="only this tenant's разборы")
+    ap.add_argument("--model", default=SUPERVISOR_MODEL, help="critic model (OpenRouter id)")
     ap.add_argument("-n", type=int, default=50, help="max cases this run")
     args = ap.parse_args()
 
@@ -103,17 +107,28 @@ async def main():
     s = supervision.stats()
 
     if args.stats:
-        print(f"Всего кейсов: {s['total']} · ждут разбора: {s['pending']}")
+        print(f"Всего кейсов: {s['total']} · ждут разбора: {s['pending']} · "
+              f"порог запуска: {MIN_CASES}\n")
+        print("По тенантам (всего / ждут разбора):")
+        for tenant, tot, waiting in s["by_tenant"]:
+            enough = "✓ хватает" if waiting >= MIN_CASES else f"нужно ещё {MIN_CASES - waiting}"
+            print(f"  {tenant}  {tot} / {waiting}   → {enough}")
+        print("\nПо признаку захвата:")
         for reason, n in s["by_reason"]:
             print(f"  {reason}: {n}")
         return
 
-    if s["pending"] < MIN_CASES and not args.force:
-        print(f"Материала мало: {s['pending']} кейсов (порог {MIN_CASES}). "
+    # scope the material threshold to the tenant we're actually about to review
+    pending_here = args.tenant and next(
+        (w for t, _, w in s["by_tenant"] if t == args.tenant), 0)
+    pending_count = pending_here if args.tenant else s["pending"]
+    if pending_count < MIN_CASES and not args.force:
+        scope = f"тенант {args.tenant}" if args.tenant else "всего"
+        print(f"Материала мало ({scope}): {pending_count} кейсов (порог {MIN_CASES}). "
               f"Выводы будут шумные — накопи ещё или запусти с --force.")
         return
 
-    cases = supervision.pending(limit=args.n)
+    cases = supervision.pending(limit=args.n, tenant=args.tenant)
     if not cases:
         print("Нечего разбирать.")
         return
@@ -121,10 +136,11 @@ async def main():
     from openai import AsyncOpenAI
     client = AsyncOpenAI(base_url=config.LLM_BASE_URL, api_key=config.LLM_API_KEY)
 
-    print(f"Супервизия: {len(cases)} кейс(ов), модель {SUPERVISOR_MODEL}\n")
+    print(f"Супервизия: {len(cases)} кейс(ов), модель {args.model}"
+          f"{', тенант ' + args.tenant if args.tenant else ''}\n")
     for case in cases:
         try:
-            verdict = await _review(client, case)
+            verdict = await _review(client, case, args.model)
         except Exception as exc:
             print(f"[case {case['id']}] ошибка критика: {exc}", file=sys.stderr)
             continue

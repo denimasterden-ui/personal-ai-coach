@@ -130,6 +130,31 @@ def test_reviewed_cases_leave_the_queue(db):
     assert supervision.pending() == []
 
 
+def test_pending_can_scope_to_one_tenant(db):
+    supervision.capture("alice", "a" * 900, "ans", budget_exhausted=True)
+    supervision.capture("bob", "b" * 900, "ans", budget_exhausted=True)
+    alice = supervision.pending(tenant="alice")
+    assert len(alice) == 1 and alice[0]["tenant"] == "alice"
+    assert len(supervision.pending()) == 2  # no filter = whole pool
+
+
+def test_stats_break_down_per_tenant(db):
+    supervision.capture("alice", "a" * 900, "ans", budget_exhausted=True)
+    supervision.capture("alice", "a" * 900, "ans", budget_exhausted=True)
+    supervision.capture("bob", "b" * 900, "ans", budget_exhausted=True)
+    by_tenant = dict((t, (tot, wait)) for t, tot, wait in supervision.stats()["by_tenant"])
+    assert by_tenant["alice"] == (2, 2)
+    assert by_tenant["bob"] == (1, 1)
+
+
+def test_stats_per_tenant_counts_only_pending_as_waiting(db):
+    supervision.capture("alice", "a" * 900, "ans", budget_exhausted=True)
+    supervision.capture("alice", "a" * 900, "ans", budget_exhausted=True)
+    supervision.mark_reviewed(supervision.pending(tenant="alice")[0]["id"], "verdict")
+    tot, wait = next((tot, w) for t, tot, w in supervision.stats()["by_tenant"] if t == "alice")
+    assert (tot, wait) == (2, 1)  # 2 captured, 1 still waiting
+
+
 def test_purge_drops_old_cases_only(db):
     supervision.capture("me2", "a" * 900, "b", budget_exhausted=True)
     fresh_id = supervision.pending()[0]["id"]

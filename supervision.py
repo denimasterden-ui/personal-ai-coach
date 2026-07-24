@@ -129,12 +129,15 @@ def _decode(blob):
     return json.loads(blob)
 
 
-def pending(limit=50):
-    """Un-reviewed cases, oldest first, with content decrypted."""
+def pending(limit=50, tenant=None):
+    """Un-reviewed cases, oldest first, with content decrypted. Optionally scoped
+    to one tenant (supervise a single person's разборы rather than the whole pool)."""
+    where = "reviewed = 0" + (" AND tenant = ?" if tenant else "")
+    params = ([tenant, limit] if tenant else [limit])
     with _conn() as c:
         rows = c.execute(
-            "SELECT id, ts, tenant, skill, reasons, tools, payload FROM cases "
-            "WHERE reviewed = 0 ORDER BY ts LIMIT ?", (limit,)
+            f"SELECT id, ts, tenant, skill, reasons, tools, payload FROM cases "
+            f"WHERE {where} ORDER BY ts LIMIT ?", params
         ).fetchall()
     out = []
     for cid, ts, tenant, skill, reasons, tools_used, payload in rows:
@@ -169,4 +172,10 @@ def stats():
         by_reason = c.execute(
             "SELECT reasons, COUNT(*) FROM cases GROUP BY reasons ORDER BY 2 DESC"
         ).fetchall()
-    return {"total": total, "pending": waiting, "by_reason": by_reason}
+        # per-tenant breakdown drives the "which tenant, is there enough?" decision
+        by_tenant = c.execute(
+            "SELECT tenant, COUNT(*), SUM(CASE WHEN reviewed = 0 THEN 1 ELSE 0 END) "
+            "FROM cases GROUP BY tenant ORDER BY 3 DESC"
+        ).fetchall()
+    return {"total": total, "pending": waiting, "by_reason": by_reason,
+            "by_tenant": by_tenant}
