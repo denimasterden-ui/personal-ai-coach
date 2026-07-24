@@ -23,7 +23,7 @@ echo "▶ 1/4 sync кода → $HOST:$REMOTE_DIR"
 rsync -az \
   --exclude='.env' --exclude='deploy/deploy.env' --exclude='tenants' \
   --exclude='*.pkl' --exclude='*.enc' --exclude='.venv' --exclude='abtest' \
-  --exclude='.git' --exclude='__pycache__' \
+  --exclude='*.db' --exclude='*.db-*' --exclude='.git' --exclude='__pycache__' \
   -e "$SSHKEY_E" ./ "$SSH_USER@$HOST:$REMOTE_DIR/"
 
 echo "▶ 2/4 жду тихое окно (active=0)…"
