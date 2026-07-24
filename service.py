@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 import config
 import memory
+import supervision
 import tools
 
 app = FastAPI()
@@ -106,6 +107,10 @@ def _restore_sessions():
 @app.on_event("startup")
 async def _on_startup():
     _restore_sessions()
+    supervision.init()
+    dropped = supervision.purge()
+    if dropped:
+        print(f"[supervision] purged {dropped} case(s) past retention", flush=True)
 
 
 @app.on_event("shutdown")
@@ -184,6 +189,12 @@ async def _run_inner(req: SessionRequest):
     session.last_used = time.time()
     messages = session.messages
 
+    # Supervision context for this turn (ADR 0003): which skill actually fired and
+    # which tools were called — the critic judges against the applied skill's own
+    # "критерий качественного разбора", so it needs to know which one that was.
+    used_tools: list[str] = []
+    skill_used = None
+
     for _ in range(MAX_STEPS):
         response = await _client.chat.completions.create(
             model=model_id,
@@ -199,7 +210,10 @@ async def _run_inner(req: SessionRequest):
 
         if not message.tool_calls:
             messages.append(message.model_dump(exclude_none=True))
-            yield _sse("answer", {"text": message.content or ""})
+            answer = message.content or ""
+            supervision.capture_async(req.tenant_id, req.message, answer,
+                                      skill=skill_used, tools_used=used_tools)
+            yield _sse("answer", {"text": answer})
             return
 
         messages.append(message.model_dump(exclude_none=True))
@@ -216,6 +230,9 @@ async def _run_inner(req: SessionRequest):
         for call, name, args, result in await asyncio.gather(
             *(_exec(c) for c in message.tool_calls)
         ):
+            used_tools.append(name)
+            if name == "load_skill":
+                skill_used = args.get("title") or skill_used
             yield _sse("tool_call", {"name": name, "args": args})
             yield _sse("tool_result", {"name": name, "ok": not (isinstance(result, dict) and result.get("error"))})
             messages.append({
@@ -244,6 +261,8 @@ async def _run_inner(req: SessionRequest):
     )
     text = final.choices[0].message.content or "(не удалось свести ответ)"
     messages.append({"role": "assistant", "content": text})
+    supervision.capture_async(req.tenant_id, req.message, text, skill=skill_used,
+                              tools_used=used_tools, budget_exhausted=True)
     yield _sse("answer", {"text": text})
 
 
