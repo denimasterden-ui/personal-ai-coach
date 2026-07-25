@@ -4,3 +4,4 @@ httpx>=0.27
 openai>=1.50
 tiktoken>=0.11
 cryptography>=42.0
+pypdf>=5.0

@@ -174,6 +174,34 @@ async def _transcribe(client, audio: bytes) -> str:
     return (r.json().get("text") or "").strip()
 
 
+# PDF attachments arrive as material for the current turn — never as a skill.
+# Skills are a shared, cross-tenant resource read straight into every system
+# prompt, so a user-supplied file must not be able to reach them (ADR 0003
+# threat model). Extracted text goes into the turn like any other message: what
+# survives is only what the coach itself chooses to save_memory.
+PDF_MAX_BYTES = 20 * 1024 * 1024  # Telegram's getFile ceiling — bigger never downloads
+PDF_MAX_CHARS = 30000             # one attachment must not eat the whole context
+
+
+def _pdf_text_sync(data: bytes) -> str:
+    from io import BytesIO
+
+    from pypdf import PdfReader
+
+    pages = PdfReader(BytesIO(data)).pages
+    return "\n\n".join((p.extract_text() or "") for p in pages).strip()
+
+
+async def _pdf_text(data: bytes) -> str:
+    """Text layer of a PDF, or '' if there is none (a scan) or it won't parse.
+    Runs off the loop — pypdf is blocking and a big file would stall every chat."""
+    try:
+        return await asyncio.to_thread(_pdf_text_sync, data)
+    except Exception as exc:
+        print(f"[pdf] parse error: {exc}", flush=True)
+        return ""
+
+
 async def _tg(client, method, **params):
     r = await client.post(f"{API}/{method}", json=params, timeout=30)
     return r.json()
@@ -480,6 +508,47 @@ async def _handle(client, msg):
         if not analytics.has_seen(_tenant_id_for(chat_id)):
             analytics.log("first_seen", _tenant_id_for(chat_id), source="")
         _buffer(client, chat_id, text)
+    elif "document" in msg:
+        doc = msg["document"]
+        name = doc.get("file_name") or "документ"
+        if not (doc.get("mime_type") == "application/pdf" or name.lower().endswith(".pdf")):
+            await _tg(client, "sendMessage", chat_id=chat_id,
+                      text=f"Из файлов пока читаю только PDF — «{name}» не возьму. "
+                           "Пришли, пожалуйста, текстом или голосовым.")
+            return
+        if (doc.get("file_size") or 0) > PDF_MAX_BYTES:
+            await _tg(client, "sendMessage", chat_id=chat_id,
+                      text="Файл больше 20 МБ — Telegram такой боту не отдаёт. "
+                           "Пришли часть текстом.")
+            return
+        await _react(client, chat_id, msg["message_id"])  # 👀 «взял в работу»
+        await _tg(client, "sendChatAction", chat_id=chat_id, action="typing")
+        info = await _tg(client, "getFile", file_id=doc["file_id"])
+        file_path = (info.get("result") or {}).get("file_path")
+        if not file_path:
+            print(f"[pdf] getFile failed: {str(info)[:200]}", flush=True)
+            await _tg(client, "sendMessage", chat_id=chat_id,
+                      text="Не смог забрать файл у Telegram. Попробуй прислать ещё раз?")
+            return
+        data = (await client.get(f"{FILE_API}/{file_path}", timeout=120)).content
+        text = await _pdf_text(data)
+        if not text:
+            await _tg(client, "sendMessage", chat_id=chat_id,
+                      text=f"В «{name}» нет текстового слоя — похоже, это скан. "
+                           "Распознавать картинки я пока не умею, пришли текстом.")
+            return
+        clipped = len(text) > PDF_MAX_CHARS
+        text = text[:PDF_MAX_CHARS]
+        print(f"[pdf] {name!r} {len(data)}B -> {len(text)} chars clipped={clipped}", flush=True)
+        await _tg(client, "sendMessage", chat_id=chat_id,
+                  text=f"📄 «{name}» — прочитал {len(text)} символов"
+                       + (", дальше обрезал." if clipped else "."))
+        if not analytics.has_seen(_tenant_id_for(chat_id)):
+            analytics.log("first_seen", _tenant_id_for(chat_id), source="")
+        _buffer(client, chat_id, f"[Документ «{name}», распознанный текст]\n\n{text}")
+    else:
+        await _tg(client, "sendMessage", chat_id=chat_id,
+                  text="Я понимаю текст, голосовые и PDF. Это пока не возьму.")
 
 
 async def main():
