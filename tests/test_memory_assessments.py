@@ -138,16 +138,28 @@ async def test_load_doc_missing_returns_error(tmp_path, monkeypatch):
     assert "error" in res
 
 
-async def test_slugless_test_or_doc_is_refused(tmp_path, monkeypatch):
+async def test_slugless_per_entry_save_is_refused(tmp_path, monkeypatch):
     """_resolve falls back to a shared "entry" filename, so a second slugless
     save overwrites the first and still reports success. Two uploaded reports
     would silently become one."""
     import tools
     monkeypatch.setattr(memory.config, "TENANTS_DIR", tmp_path)
-    res = await tools.dispatch(
-        "save_memory", {"type": "test", "content": "x", "source": "отчёт"}, "t1")
-    assert "error" in res and "slug" in res["error"]
+    for kind in sorted(memory._PER_ENTRY - {"doc"}):
+        res = await tools.dispatch(
+            "save_memory", {"type": kind, "content": "x", "source": "отчёт"}, "t1")
+        assert "error" in res and "slug" in res["error"], kind
     assert not list(tmp_path.rglob("*.md"))
+
+
+async def test_single_file_types_still_need_no_slug(tmp_path, monkeypatch):
+    """self/open_loops/evidence are one file each — demanding a slug there would
+    break every ordinary profile write."""
+    import tools
+    monkeypatch.setattr(memory.config, "TENANTS_DIR", tmp_path)
+    for kind in sorted(memory._SINGLE_FILE):
+        res = await tools.dispatch(
+            "save_memory", {"type": kind, "content": "x", "source": "сессия"}, "t1")
+        assert "error" not in res, kind
 
 
 async def test_two_reports_with_slugs_both_survive(tmp_path, monkeypatch):

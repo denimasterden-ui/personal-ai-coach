@@ -137,10 +137,11 @@ async def dispatch(name, args, tenant_id):
             return {"error": "Запись отклонена: не указан source. Назови, откуда этот "
                              "факт — результат теста (какого именно), слова человека в "
                              "сессии, или твой собственный вывод/гипотеза. Повтори вызов."}
-        # _resolve falls back to a shared "entry" filename when slug is missing,
-        # so a second sourceless save silently overwrites the first and still
-        # reports success. Harmless for a pattern; for a test result or an
-        # uploaded report it destroys the very evidence a profile claim rests on.
+        # _resolve falls back to a shared "entry" filename when slug is missing, so
+        # a second slugless save silently overwrites the first and still reports
+        # success. Never fired in production (no entry.md exists), but it is the
+        # same quiet-data-loss path either way. Read from memory._PER_ENTRY so a
+        # new per-entry type is covered the day it is added, not the day it bites.
         # doc is a transport artefact: the bot writes it when a file arrives, and
         # recall deliberately collapses it to a stub. A разбор filed there becomes
         # a 249-char preview instead of a finding — which is exactly what happened
@@ -150,10 +151,10 @@ async def dispatch(name, args, tenant_id):
                              "сохраняет бот. Свой разбор результата теста сохраняй "
                              "типом test: он попадает в recall целиком, а doc — "
                              "только превью."}
-        if args["type"] in ("test", "doc") and not (args.get("slug") or "").strip():
+        if args["type"] in memory._PER_ENTRY and not (args.get("slug") or "").strip():
             return {"error": f"Запись отклонена: для типа {args['type']} нужен slug — "
                              "без него запись затрёт предыдущую. Дай короткий "
-                             "идентификатор (например clifton-2021, hogan-2024)."}
+                             "идентификатор (например clifton-2021, uhod-iz-pizzy)."}
         return await memory.save_memory(
             tenant_id, args["type"], args["content"],
             slug=args.get("slug"), supersedes=args.get("supersedes"),
