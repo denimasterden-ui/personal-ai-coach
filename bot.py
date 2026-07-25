@@ -21,6 +21,7 @@ import json
 import os
 import signal
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -537,15 +538,49 @@ async def _handle(client, msg):
                       text=f"В «{name}» нет текстового слоя — похоже, это скан. "
                            "Распознавать картинки я пока не умею, пришли текстом.")
             return
-        clipped = len(text) > PDF_MAX_CHARS
-        text = text[:PDF_MAX_CHARS]
-        print(f"[pdf] {name!r} {len(data)}B -> {len(text)} chars clipped={clipped}", flush=True)
+        full_chars = len(text)
+        tenant = _tenant_id_for(chat_id)
+        # Сохраняем распознанный текст ЦЕЛИКОМ как память типа doc — обрезка
+        # ниже касается только того, что уходит в реплику хода, не самого
+        # документа. По slug коуч достаёт полный текст через load_doc; recall
+        # отдаёт лишь превью, так что большой отчёт не затапливает контекст.
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        slug = memory._slug(name)  # тот же slug, по которому память положит файл
+        source = f"файл «{name}», прислан в Telegram {stamp}"
+        saved = await memory.save_memory(tenant, "doc", text, slug=slug, source=source)
+        # save_memory не бросает, а возвращает {"error": ...}. Без этой проверки
+        # сбой записи выглядел бы как успех: пользователю «сохранил целиком», а
+        # коучу — load_doc(slug), который ничего не найдёт.
+        stored = not (isinstance(saved, dict) and saved.get("error"))
+        if not stored:
+            print(f"[pdf] save failed for {slug!r}: {saved}", flush=True)
+        # В реплику хода идёт лишь превью — полный текст лежит в памяти и
+        # доступен по slug. Превью помечаем обрезкой явно, чтобы коуч не
+        # рассуждал по огрызку как по целому документу.
+        clipped = full_chars > PDF_MAX_CHARS
+        preview = text[:PDF_MAX_CHARS]
+        print(f"[pdf] {name!r} {len(data)}B -> {full_chars} chars saved, "
+              f"turn preview {len(preview)} clipped={clipped}", flush=True)
         await _tg(client, "sendMessage", chat_id=chat_id,
-                  text=f"📄 «{name}» — прочитал {len(text)} символов"
-                       + (", дальше обрезал." if clipped else "."))
-        if not analytics.has_seen(_tenant_id_for(chat_id)):
-            analytics.log("first_seen", _tenant_id_for(chat_id), source="")
-        _buffer(client, chat_id, f"[Документ «{name}», распознанный текст]\n\n{text}")
+                  text=(f"📄 «{name}» — прочитал {full_chars} символов и сохранил целиком."
+                        + (f" В ход идёт только начало ({PDF_MAX_CHARS} символов), "
+                           "остальное коуч дочитает сам." if clipped else "")
+                        if stored else
+                        f"📄 «{name}» — прочитал {full_chars} символов, но сохранить не смог. "
+                        "В разбор уйдёт только начало документа."))
+        if not analytics.has_seen(tenant):
+            analytics.log("first_seen", tenant, source="")
+        # Шапка обязана быть честной в обе стороны: что документ есть целиком и как
+        # его дочитать — либо что ниже огрызок и остального не будет.
+        head = (f"[Документ «{name}» ({full_chars} символов) сохранён целиком, "
+                f"полный текст: load_doc(\"{slug}\")."
+                + (f" Ниже только первые {PDF_MAX_CHARS} символов." if clipped else "")
+                if stored else
+                f"[Документ «{name}» ({full_chars} символов) сохранить не удалось, "
+                f"дочитать нечем. Ниже "
+                + (f"только первые {PDF_MAX_CHARS} символов — остального нет."
+                   if clipped else "весь распознанный текст."))
+        _buffer(client, chat_id, f"{head}]\n\n{preview}")
     else:
         await _tg(client, "sendMessage", chat_id=chat_id,
                   text="Я понимаю текст, голосовые и PDF. Это пока не возьму.")
