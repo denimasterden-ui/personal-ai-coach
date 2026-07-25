@@ -299,8 +299,17 @@ async def _worker(client, chat_id):
     st = _chat[chat_id]
     while st["parts"]:
         # debounce: wait until DEBOUNCE_SEC of quiet since the last message, so a
-        # burst of fragments joins into one turn
-        while (gap := DEBOUNCE_SEC - (time.time() - st["last"])) > 0:
+        # burst of fragments joins into one turn. `preparing` holds the window
+        # open while an attachment is still being fetched and parsed — a PDF takes
+        # seconds, and without this the text sent alongside it flushed alone and
+        # got its own separate answer.
+        while True:
+            if st["preparing"]:
+                await asyncio.sleep(0.2)
+                continue
+            gap = DEBOUNCE_SEC - (time.time() - st["last"])
+            if gap <= 0:
+                break
             await asyncio.sleep(gap)
         text = "\n\n".join(st["parts"]); st["parts"] = []
         voice = st["voice"]; st["voice"] = False
@@ -328,8 +337,13 @@ async def _worker(client, chat_id):
         print(f"[answer] sent {len(answer)} chars", flush=True)
 
 
+def _state(chat_id):
+    return _chat.setdefault(chat_id, {"parts": [], "voice": False, "last": 0.0,
+                                      "worker": None, "preparing": 0})
+
+
 def _buffer(client, chat_id, text, kind="text"):
-    st = _chat.setdefault(chat_id, {"parts": [], "voice": False, "last": 0.0, "worker": None})
+    st = _state(chat_id)
     st["parts"].append(text)
     st["voice"] = st["voice"] or kind == "voice"
     st["last"] = time.time()
@@ -461,8 +475,25 @@ async def _set_commands(client):
 
 
 async def _handle(client, msg):
+    """Keep the debounce window open while a slow attachment is prepared. The
+    counter must be raised before the first await, so the worker started by a
+    text message that arrived in the same batch can't flush ahead of it."""
+    slow = bool({"voice", "audio", "document"} & msg.keys())
+    st = _state(msg["chat"]["id"]) if slow else None
+    if st:
+        st["preparing"] += 1
+    try:
+        await _handle_inner(client, msg)
+    finally:
+        if st:
+            st["preparing"] -= 1
+
+
+async def _handle_inner(client, msg):
     chat_id = msg["chat"]["id"]
-    kind = "voice" if ("voice" in msg or "audio" in msg) else ("text" if "text" in msg else "other")
+    kind = ("voice" if ("voice" in msg or "audio" in msg)
+            else "document" if "document" in msg
+            else "text" if "text" in msg else "other")
     print(f"[msg] chat={chat_id} kind={kind}", flush=True)
 
     if PUBLIC_MODE:

@@ -144,20 +144,37 @@ async def test_slugless_test_or_doc_is_refused(tmp_path, monkeypatch):
     would silently become one."""
     import tools
     monkeypatch.setattr(memory.config, "TENANTS_DIR", tmp_path)
-    for kind in ("test", "doc"):
-        res = await tools.dispatch(
-            "save_memory", {"type": kind, "content": "x", "source": "отчёт"}, "t1")
-        assert "error" in res and "slug" in res["error"], kind
+    res = await tools.dispatch(
+        "save_memory", {"type": "test", "content": "x", "source": "отчёт"}, "t1")
+    assert "error" in res and "slug" in res["error"]
     assert not list(tmp_path.rglob("*.md"))
 
 
 async def test_two_reports_with_slugs_both_survive(tmp_path, monkeypatch):
     """The positive case the refusal exists to protect."""
-    import tools
     monkeypatch.setattr(memory.config, "TENANTS_DIR", tmp_path)
     for slug, body in (("hogan-2024", "отчёт Хогана"), ("clifton-2021", "отчёт Гэллап")):
-        await tools.dispatch("save_memory",
-                             {"type": "doc", "content": body, "slug": slug,
-                              "source": f"файл {slug}"}, "t1")
+        await memory.save_memory("t1", "doc", body, slug=slug, source=f"файл {slug}")
     assert "отчёт Хогана" in await memory.load_doc("t1", "hogan-2024")
     assert "отчёт Гэллап" in await memory.load_doc("t1", "clifton-2021")
+
+
+async def test_model_cannot_file_its_analysis_as_a_raw_document(tmp_path, monkeypatch):
+    """recall collapses docs/ to a preview by design, so a разбор filed there is
+    hidden rather than saved. On the first live upload the coach did exactly this
+    and its correct 1-34 ranking came back as 249 chars."""
+    import tools
+    monkeypatch.setattr(memory.config, "TENANTS_DIR", tmp_path)
+    res = await tools.dispatch(
+        "save_memory",
+        {"type": "doc", "content": "мой разбор", "slug": "analysis", "source": "разбор"}, "t1")
+    assert "error" in res and "test" in res["error"], "must point at the right type"
+    assert not list(tmp_path.rglob("*.md"))
+
+
+async def test_the_bot_can_still_store_a_document_directly(tmp_path, monkeypatch):
+    """The gate sits in dispatch (the model's door), not in memory — the bot
+    writes documents through save_memory and must keep working."""
+    monkeypatch.setattr(memory.config, "TENANTS_DIR", tmp_path)
+    await memory.save_memory("t1", "doc", "сырой текст", slug="report", source="файл")
+    assert "сырой текст" in await memory.load_doc("t1", "report")

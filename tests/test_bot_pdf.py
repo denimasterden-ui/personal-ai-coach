@@ -5,6 +5,8 @@ in the turn buffer as ordinary material and nowhere else. Every rejection path
 must still say something back — the bug that started this was a message type
 that produced total silence.
 """
+import asyncio
+
 import pytest
 
 import bot
@@ -171,3 +173,66 @@ async def test_failed_save_is_not_reported_as_success(tg, buffered, monkeypatch)
     await bot._handle(FakeClient(), _msg())
     assert "не смог" in _texts(tg)
     assert "load_doc" not in buffered[0], "must not advertise a document that isn't there"
+
+
+async def test_attachment_holds_the_turn_open_for_a_text_sent_with_it(tg, monkeypatch):
+    """The reported bug: a caption and its PDF arrived in one batch, the text
+    flushed on its own timer while the 469KB file was still downloading, and one
+    turn produced two separate answers. Uses the real _buffer/_worker."""
+    monkeypatch.setattr(bot, "DEBOUNCE_SEC", 0.2)
+    turns = []
+
+    async def slow_pdf(_data):
+        await asyncio.sleep(0.6)  # download + parse, longer than the debounce
+        return "текст отчёта"
+
+    monkeypatch.setattr(bot, "_pdf_text", slow_pdf)
+    monkeypatch.setattr(bot, "_ask_brain", _capture_turn(turns))
+    monkeypatch.setattr(bot, "_send_text", _noop)
+
+    await bot._handle(FakeClient(), {"chat": {"id": 7}, "message_id": 1, "text": "разбери мой тест"})
+    await bot._handle(FakeClient(), _msg())
+    await _drain(7)
+
+    assert len(turns) == 1, f"one turn expected, got {len(turns)}"
+    assert "разбери мой тест" in turns[0] and "текст отчёта" in turns[0]
+
+
+async def test_a_refused_attachment_releases_the_turn(tg, monkeypatch):
+    """A leaked counter on a rejection path would hang the worker forever."""
+    monkeypatch.setattr(bot, "DEBOUNCE_SEC", 0.2)
+    turns = []
+    monkeypatch.setattr(bot, "_ask_brain", _capture_turn(turns))
+    monkeypatch.setattr(bot, "_send_text", _noop)
+
+    await bot._handle(FakeClient(), {"chat": {"id": 7}, "message_id": 1, "text": "привет"})
+    await bot._handle(FakeClient(), _msg(file_name="x.docx", mime_type="application/msword"))
+    await _drain(7)
+
+    assert bot._chat[7]["preparing"] == 0, "counter must not leak on a refusal"
+    assert len(turns) == 1 and "привет" in turns[0]
+
+
+def _capture_turn(sink):
+    async def _f(client, tenant, session, text, model=None):
+        sink.append(text)
+        return "ответ"
+    return _f
+
+
+async def _noop(*a, **k):
+    return None
+
+
+async def _drain(chat_id, timeout=5.0):
+    """Wait until the chat has no pending attachment, no buffered parts and no
+    running worker — i.e. every turn it was going to make has been made."""
+    async def _wait():
+        while True:
+            st = bot._chat.get(chat_id)
+            if st and not st["preparing"] and not st["parts"]:
+                w = st["worker"]
+                if w is None or w.done():
+                    return
+            await asyncio.sleep(0.05)
+    await asyncio.wait_for(_wait(), timeout=timeout)

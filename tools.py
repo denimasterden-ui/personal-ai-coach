@@ -45,9 +45,10 @@ TOOL_SCHEMAS = [
                     "type": {"type": "string", "enum": MEM_TYPES,
                              "description": "self/open_loops/evidence — один файл; "
                              "pattern/coach/decision/session/test/doc — по slug. "
-                             "test — результат психометрического теста (инструмент, дата, расклад); "
-                             "doc — распознанный текст присланного отчёта целиком (recall отдаёт только "
-                             "превью, полный текст — через load_doc(slug))."},
+                             "test — результат психометрического теста (инструмент, дата, расклад) "
+                             "и твой разбор этого результата — сюда, целиком попадает в recall; "
+                             "doc — сырой текст присланного файла, его пишет бот, тебе писать туда "
+                             "нельзя (recall отдаёт по нему только превью, целиком — load_doc(slug))."},
                     "content": {"type": "string", "description": "Содержимое в markdown"},
                     "mode": {"type": "string", "enum": ["append", "replace"],
                              "description": "Только для single-file типов: дополнить или переписать целиком. По умолчанию append."},
@@ -112,6 +113,15 @@ async def dispatch(name, args, tenant_id):
         # so a second sourceless save silently overwrites the first and still
         # reports success. Harmless for a pattern; for a test result or an
         # uploaded report it destroys the very evidence a profile claim rests on.
+        # doc is a transport artefact: the bot writes it when a file arrives, and
+        # recall deliberately collapses it to a stub. A разбор filed there becomes
+        # a 249-char preview instead of a finding — which is exactly what happened
+        # on the first live upload. The model's structured result belongs in test.
+        if args["type"] == "doc":
+            return {"error": "Тип doc — это сырой текст присланного файла, его "
+                             "сохраняет бот. Свой разбор результата теста сохраняй "
+                             "типом test: он попадает в recall целиком, а doc — "
+                             "только превью."}
         if args["type"] in ("test", "doc") and not (args.get("slug") or "").strip():
             return {"error": f"Запись отклонена: для типа {args['type']} нужен slug — "
                              "без него запись затрёт предыдущую. Дай короткий "
