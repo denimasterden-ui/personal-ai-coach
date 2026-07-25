@@ -24,7 +24,12 @@ import config
 import memory
 import supervision
 
-SUPERVISOR_MODEL = os.environ.get("SUPERVISOR_MODEL", "anthropic/claude-opus-4.5")
+# Cross-family by default: the coach runs on Claude, so a Claude critic partly
+# approves its own house style (self-preference bias). A stronger same-family
+# critic gives the sharper разбор — override with SUPERVISOR_MODEL when that
+# matters more than independence — but the default should not have correlated
+# blind spots with the thing it's judging.
+SUPERVISOR_MODEL = os.environ.get("SUPERVISOR_MODEL", "google/gemini-2.5-pro")
 MIN_CASES = int(os.environ.get("SUPERVISION_MIN_CASES", "20"))
 
 RUBRIC = """Ты — супервизор коуча. Разбираешь работу AI-коуча, чтобы улучшить его
@@ -44,10 +49,20 @@ RUBRIC = """Ты — супервизор коуча. Разбираешь ра�
   2.1 Партнёрство: коуч работает вместе с человеком, а не сверху-вниз?
   2.2 Эмпатия: отражает то, что человек реально принёс, а не свою интерпретацию?
 
-СЛОЙ 3 — коучинговые маркеры (ICF):
-  3.1 Недирективность: помогает найти ответ, а не выдаёт готовый вывод?
-  3.2 Тема клиента: работает с тем, что принёс человек, а не с подменённой темой?
-  3.3 Доведение до действия: разбор закончился честным следующим шагом?
+СЛОЙ 3 — выбор оптики (обвязка, не человек):
+  3.0 Была ли применена подходящая оптика из каталога? Ниже — что коуч
+      подгрузил (или не подгрузил) и что вообще было доступно. Если запрос явно
+      попадал в описание неиспользованной оптики — это дефект маршрутизации, а
+      не стиля: так и напиши в «ЧТО ПРАВИТЬ». Если базового плейбука хватало —
+      скажи прямо, не выдумывай замечание.
+
+КАТАЛОГ ДОСТУПНЫХ ОПТИК:
+{catalogue}
+
+СЛОЙ 4 — коучинговые маркеры (ICF):
+  4.1 Недирективность: помогает найти ответ, а не выдаёт готовый вывод?
+  4.2 Тема клиента: работает с тем, что принёс человек, а не с подменённой темой?
+  4.3 Доведение до действия: разбор закончился честным следующим шагом?
 
 В конце — блок «ЧТО ПРАВИТЬ» — 1-3 конкретных пункта: правка скилла, промпта или
 обвязки. Если разбор хороший — так и напиши, не выдумывай замечаний."""
@@ -74,17 +89,28 @@ def _criterion(skill_title):
     return marker + (section[:end] if end != -1 else section)
 
 
+def _catalogue():
+    """What the coach could have reached for. Without it the critic can't tell a
+    missing optic from an optic that doesn't exist."""
+    items = memory._catalog_sync()
+    if not items:
+        return "  (каталог пуст)"
+    return "\n".join(f"  - {i['title']}: {i['description']}" for i in items)
+
+
 def _case_prompt(case):
+    optic = case["skill"] or "ни одной, только базовый плейбук"
     return (
         f"СЕССИЯ (захвачена по признаку: {case['reasons']}; вызванные инструменты: "
-        f"{case['tools'] or '—'})\n\n"
+        f"{case['tools'] or '—'}; применённая оптика: {optic})\n\n"
         f"--- Что написал человек ---\n{case['user']}\n\n"
         f"--- Что ответил коуч ---\n{case['answer']}\n"
     )
 
 
 async def _review(client, case, model):
-    system = RUBRIC.format(skill_criterion=_criterion(case["skill"]))
+    system = RUBRIC.format(skill_criterion=_criterion(case["skill"]),
+                           catalogue=_catalogue())
     resp = await client.chat.completions.create(
         model=model,
         messages=[{"role": "system", "content": system},
