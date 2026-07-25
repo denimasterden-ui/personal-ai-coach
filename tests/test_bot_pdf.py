@@ -81,11 +81,11 @@ async def test_long_pdf_says_the_turn_holds_only_the_start(tg, buffered, monkeyp
     """The turn carries a preview, so both the user and the coach must be told
     so — reasoning over a silent stub as if it were whole is the failure that
     started this."""
-    monkeypatch.setattr(bot, "_pdf_text", _const("я" * (bot.PDF_MAX_CHARS + 500)))
+    monkeypatch.setattr(bot, "_pdf_text", _const("я" * (bot.DOC_MAX_CHARS + 500)))
     await bot._handle(FakeClient(), _msg())
-    assert len(buffered[0]) <= bot.PDF_MAX_CHARS + 300  # + the header
-    assert str(bot.PDF_MAX_CHARS) in _texts(tg), "user must learn the turn is partial"
-    assert str(bot.PDF_MAX_CHARS) in buffered[0], "coach must learn the turn is partial"
+    assert len(buffered[0]) <= bot.DOC_MAX_CHARS + 300  # + the header
+    assert str(bot.DOC_MAX_CHARS) in _texts(tg), "user must learn the turn is partial"
+    assert str(bot.DOC_MAX_CHARS) in buffered[0], "coach must learn the turn is partial"
 
 
 async def test_scan_without_text_layer_is_refused_not_silent(tg, buffered, monkeypatch):
@@ -103,7 +103,7 @@ async def test_non_pdf_document_is_refused_without_downloading(tg, buffered):
 
 
 async def test_oversize_pdf_is_refused_without_downloading(tg, buffered):
-    await bot._handle(FakeClient(), _msg(file_size=bot.PDF_MAX_BYTES + 1))
+    await bot._handle(FakeClient(), _msg(file_size=bot.DOC_MAX_BYTES + 1))
     assert buffered == []
     assert "20 МБ" in _texts(tg)
     assert not any(m == "getFile" for m, _ in tg)
@@ -140,7 +140,7 @@ def _const(value):
 async def test_whole_document_is_stored_not_just_the_preview(tg, buffered, monkeypatch):
     """The point of the change: the clipped part must survive somewhere. A
     55k-char assessment report losing half of itself was the original defect."""
-    body = "я" * (bot.PDF_MAX_CHARS + 5000)
+    body = "я" * (bot.DOC_MAX_CHARS + 5000)
     monkeypatch.setattr(bot, "_pdf_text", _const(body))
     await bot._handle(FakeClient(), _msg())
     stored = await memory.load_doc(bot._tenant_id_for(7), memory._slug("report.pdf"))
@@ -236,3 +236,47 @@ async def _drain(chat_id, timeout=5.0):
                     return
             await asyncio.sleep(0.05)
     await asyncio.wait_for(_wait(), timeout=timeout)
+
+
+async def test_markdown_transcript_is_accepted(tg):
+    """A session transcript is as legitimate a source for a profile claim as a
+    PDF report; refusing .md sent the user back to copy-pasting."""
+    body = "# Разбор 2021\n\nкоуч: ...\nденис: ..."
+    await bot._handle(FakeClient(body.encode("utf-8")),
+                      _msg(file_name="transcript.md", mime_type="text/markdown"))
+    stored = await memory.load_doc(bot._tenant_id_for(7), memory._slug("transcript.md"))
+    assert stored is not None and "коуч: ..." in stored
+
+
+async def test_plain_text_without_a_useful_mime_is_accepted(tg, monkeypatch):
+    """Telegram often reports .md as application/octet-stream — the suffix has to
+    be enough on its own."""
+    await bot._handle(FakeClient("заметки".encode("utf-8")),
+                      _msg(file_name="notes.txt", mime_type="application/octet-stream"))
+    assert await memory.load_doc(bot._tenant_id_for(7), memory._slug("notes.txt"))
+
+
+async def test_text_file_is_not_run_through_the_pdf_parser(tg, monkeypatch):
+    """Plain text needs no parser; sending it through pypdf would yield nothing."""
+    called = []
+
+    async def spy(_d):
+        called.append(1)
+        return ""
+    monkeypatch.setattr(bot, "_pdf_text", spy)
+    await bot._handle(FakeClient("текст".encode("utf-8")),
+                      _msg(file_name="a.txt", mime_type="text/plain"))
+    assert not called, "a .txt must not reach the PDF path"
+
+
+async def test_non_utf8_text_file_is_refused_clearly(tg):
+    await bot._handle(FakeClient(b"\xff\xfe\x00binary"),
+                      _msg(file_name="broken.txt", mime_type="text/plain"))
+    assert "UTF-8" in _texts(tg)
+
+
+async def test_unsupported_extension_still_refused(tg):
+    await bot._handle(FakeClient(), _msg(file_name="sheet.xlsx",
+                                         mime_type="application/vnd.ms-excel"))
+    assert "не возьму" in _texts(tg)
+    assert not any(m == "getFile" for m, _ in tg)

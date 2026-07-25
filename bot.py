@@ -180,8 +180,23 @@ async def _transcribe(client, audio: bytes) -> str:
 # prompt, so a user-supplied file must not be able to reach them (ADR 0003
 # threat model). Extracted text goes into the turn like any other message: what
 # survives is only what the coach itself chooses to save_memory.
-PDF_MAX_BYTES = 20 * 1024 * 1024  # Telegram's getFile ceiling — bigger never downloads
-PDF_MAX_CHARS = 30000             # one attachment must not eat the whole context
+DOC_MAX_BYTES = 20 * 1024 * 1024  # Telegram's getFile ceiling — bigger never downloads
+DOC_MAX_CHARS = 30000             # one attachment must not eat the whole context
+
+# Plain text needs no parser — a transcript or exported notes are as legitimate a
+# source for a profile claim as a PDF report, and refusing them sent the user
+# back to copy-pasting. Telegram's mime for .md is unreliable (text/markdown,
+# application/octet-stream, sometimes absent), so the suffix decides too.
+TEXT_SUFFIXES = (".md", ".markdown", ".txt")
+
+
+def _doc_kind(name: str, mime: str | None) -> str | None:
+    low = name.lower()
+    if mime == "application/pdf" or low.endswith(".pdf"):
+        return "pdf"
+    if (mime or "").startswith("text/") or low.endswith(TEXT_SUFFIXES):
+        return "text"
+    return None
 
 
 def _pdf_text_sync(data: bytes) -> str:
@@ -543,12 +558,15 @@ async def _handle_inner(client, msg):
     elif "document" in msg:
         doc = msg["document"]
         name = doc.get("file_name") or "документ"
-        if not (doc.get("mime_type") == "application/pdf" or name.lower().endswith(".pdf")):
+        kind_doc = _doc_kind(name, doc.get("mime_type"))
+        if kind_doc is None:
+            print(f"[doc] отказ: {name!r} тип {doc.get('mime_type')!r} не поддержан", flush=True)
             await _tg(client, "sendMessage", chat_id=chat_id,
-                      text=f"Из файлов пока читаю только PDF — «{name}» не возьму. "
+                      text=f"Из файлов читаю PDF и текстовые (.md, .txt) — «{name}» не возьму. "
                            "Пришли, пожалуйста, текстом или голосовым.")
             return
-        if (doc.get("file_size") or 0) > PDF_MAX_BYTES:
+        if (doc.get("file_size") or 0) > DOC_MAX_BYTES:
+            print(f"[doc] отказ: {name!r} {doc.get('file_size')}B больше потолка", flush=True)
             await _tg(client, "sendMessage", chat_id=chat_id,
                       text="Файл больше 20 МБ — Telegram такой боту не отдаёт. "
                            "Пришли часть текстом.")
@@ -558,17 +576,30 @@ async def _handle_inner(client, msg):
         info = await _tg(client, "getFile", file_id=doc["file_id"])
         file_path = (info.get("result") or {}).get("file_path")
         if not file_path:
-            print(f"[pdf] getFile failed: {str(info)[:200]}", flush=True)
+            print(f"[doc] отказ: getFile не отдал файл — {str(info)[:200]}", flush=True)
             await _tg(client, "sendMessage", chat_id=chat_id,
                       text="Не смог забрать файл у Telegram. Попробуй прислать ещё раз?")
             return
         data = (await client.get(f"{FILE_API}/{file_path}", timeout=120)).content
-        text = await _pdf_text(data)
-        if not text:
-            await _tg(client, "sendMessage", chat_id=chat_id,
-                      text=f"В «{name}» нет текстового слоя — похоже, это скан. "
-                           "Распознавать картинки я пока не умею, пришли текстом.")
-            return
+        if kind_doc == "pdf":
+            text = await _pdf_text(data)
+            if not text:
+                print(f"[doc] отказ: {name!r} без текстового слоя (скан?)", flush=True)
+                await _tg(client, "sendMessage", chat_id=chat_id,
+                          text=f"В «{name}» нет текстового слоя — похоже, это скан. "
+                               "Распознавать картинки я пока не умею, пришли текстом.")
+                return
+        else:
+            try:
+                text = data.decode("utf-8").strip()
+            except UnicodeDecodeError:
+                text = ""
+            if not text:
+                print(f"[doc] отказ: {name!r} не читается как UTF-8", flush=True)
+                await _tg(client, "sendMessage", chat_id=chat_id,
+                          text=f"«{name}» не читается как текст в UTF-8. "
+                               "Пересохрани в UTF-8 или пришли содержимое сообщением.")
+                return
         full_chars = len(text)
         tenant = _tenant_id_for(chat_id)
         # Сохраняем распознанный текст ЦЕЛИКОМ как память типа doc — обрезка
@@ -584,17 +615,17 @@ async def _handle_inner(client, msg):
         # коучу — load_doc(slug), который ничего не найдёт.
         stored = not (isinstance(saved, dict) and saved.get("error"))
         if not stored:
-            print(f"[pdf] save failed for {slug!r}: {saved}", flush=True)
+            print(f"[doc] сохранить {slug!r} не удалось: {saved}", flush=True)
         # В реплику хода идёт лишь превью — полный текст лежит в памяти и
         # доступен по slug. Превью помечаем обрезкой явно, чтобы коуч не
         # рассуждал по огрызку как по целому документу.
-        clipped = full_chars > PDF_MAX_CHARS
-        preview = text[:PDF_MAX_CHARS]
-        print(f"[pdf] {name!r} {len(data)}B -> {full_chars} chars saved, "
-              f"turn preview {len(preview)} clipped={clipped}", flush=True)
+        clipped = full_chars > DOC_MAX_CHARS
+        preview = text[:DOC_MAX_CHARS]
+        print(f"[doc] {kind_doc} {name!r} {len(data)}B -> {full_chars} симв. сохранено, "
+              f"в ход {len(preview)}, обрезано={clipped}", flush=True)
         await _tg(client, "sendMessage", chat_id=chat_id,
                   text=(f"📄 «{name}» — прочитал {full_chars} символов и сохранил целиком."
-                        + (f" В ход идёт только начало ({PDF_MAX_CHARS} символов), "
+                        + (f" В ход идёт только начало ({DOC_MAX_CHARS} символов), "
                            "остальное коуч дочитает сам." if clipped else "")
                         if stored else
                         f"📄 «{name}» — прочитал {full_chars} символов, но сохранить не смог. "
@@ -605,11 +636,11 @@ async def _handle_inner(client, msg):
         # его дочитать — либо что ниже огрызок и остального не будет.
         head = (f"[Документ «{name}» ({full_chars} символов) сохранён целиком, "
                 f"полный текст: load_doc(\"{slug}\")."
-                + (f" Ниже только первые {PDF_MAX_CHARS} символов." if clipped else "")
+                + (f" Ниже только первые {DOC_MAX_CHARS} символов." if clipped else "")
                 if stored else
                 f"[Документ «{name}» ({full_chars} символов) сохранить не удалось, "
                 f"дочитать нечем. Ниже "
-                + (f"только первые {PDF_MAX_CHARS} символов — остального нет."
+                + (f"только первые {DOC_MAX_CHARS} символов — остального нет."
                    if clipped else "весь распознанный текст."))
         _buffer(client, chat_id, f"{head}]\n\n{preview}")
     else:
