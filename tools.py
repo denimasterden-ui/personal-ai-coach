@@ -108,6 +108,14 @@ async def dispatch(name, args, tenant_id):
             return {"error": "Запись отклонена: не указан source. Назови, откуда этот "
                              "факт — результат теста (какого именно), слова человека в "
                              "сессии, или твой собственный вывод/гипотеза. Повтори вызов."}
+        # _resolve falls back to a shared "entry" filename when slug is missing,
+        # so a second sourceless save silently overwrites the first and still
+        # reports success. Harmless for a pattern; for a test result or an
+        # uploaded report it destroys the very evidence a profile claim rests on.
+        if args["type"] in ("test", "doc") and not (args.get("slug") or "").strip():
+            return {"error": f"Запись отклонена: для типа {args['type']} нужен slug — "
+                             "без него запись затрёт предыдущую. Дай короткий "
+                             "идентификатор (например clifton-2021, hogan-2024)."}
         return await memory.save_memory(
             tenant_id, args["type"], args["content"],
             slug=args.get("slug"), supersedes=args.get("supersedes"),
