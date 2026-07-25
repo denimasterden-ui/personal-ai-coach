@@ -217,6 +217,40 @@ async def load_doc(tenant_id, slug):
         return None
 
 
+def _edit_sync(tenant_id, mem_type, slug, old, new, source):
+    """Replace one exact fragment in a memory file. Single-file memory could only
+    append or be rewritten whole, so correcting one wrong claim meant either
+    leaving it above the correction (the model then sees both) or regenerating
+    tens of KB of profile. Uniqueness is required: an ambiguous match would edit
+    a place the model didn't mean."""
+    path = _resolve(tenant_id, mem_type, slug)
+    if not path.exists():
+        return {"error": f"нет такой записи: {mem_type}" + (f"/{slug}" if slug else "")}
+    text = _read_text(path)
+    hits = text.count(old)
+    if hits == 0:
+        return {"error": "фрагмент не найден дословно — перечитай запись через recall "
+                         "и повтори с точной цитатой"}
+    if hits > 1:
+        return {"error": f"фрагмент встречается {hits} раз — возьми более длинную "
+                         "цитату, чтобы правка попала в нужное место"}
+    body = text.replace(old, new)
+    # keep one footer: the newest edit and where its correction came from
+    body = re.sub(r"\n*_updated: [^\n]*_\s*$", "", body).rstrip()
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    body += f"\n\n_updated: {stamp} (правка: {' '.join(source.split())})_\n"
+    _write_text(path, body)
+    return {"edited": f"{mem_type}/{slug}" if slug else mem_type}
+
+
+async def edit_memory(tenant_id, mem_type, old, new, slug=None, source=None):
+    try:
+        return await asyncio.to_thread(_edit_sync, tenant_id, mem_type, slug, old, new, source)
+    except Exception as exc:
+        log.warning("edit_memory(%s/%s) failed: %s", mem_type, slug, exc)
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 # ── user-facing memory ops (bot commands: /memory, /export, /delete_my_data) ──
 
 def _one(d, name):

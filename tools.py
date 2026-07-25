@@ -68,6 +68,34 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "edit_memory",
+            "description": (
+                "Точечно исправь одно место в уже записанной памяти: old_string "
+                "заменяется на new_string. Бери для исправления устаревшего или "
+                "неверного утверждения — вместо того чтобы дописывать поправку "
+                "(тогда неверное останется выше и ты будешь видеть оба) или "
+                "переписывать файл целиком (потеряешь остальное). Фрагмент должен "
+                "встречаться ровно один раз — цитируй дословно, с запасом контекста."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string", "enum": MEM_TYPES,
+                             "description": "тип записи, которую правишь"},
+                    "old_string": {"type": "string", "description": "дословный фрагмент, который заменяем"},
+                    "new_string": {"type": "string", "description": "чем заменяем"},
+                    "slug": {"type": "string", "description": "для типов по slug"},
+                    "source": {"type": "string",
+                               "description": "откуда взято исправление — результат теста, "
+                               "слова человека, твой вывод"},
+                },
+                "required": ["type", "old_string", "new_string", "source"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "load_skill",
             "description": "Подгрузи полный текст оптики/метода из каталога скиллов по title, когда он релевантен разбору.",
             "parameters": {
@@ -131,6 +159,16 @@ async def dispatch(name, args, tenant_id):
             slug=args.get("slug"), supersedes=args.get("supersedes"),
             mode=args.get("mode", "append"), source=args.get("source"),
         )
+    if name == "edit_memory":
+        if not (args.get("source") or "").strip():
+            return {"error": "Правка отклонена: не указан source — назови, откуда "
+                             "взято исправление."}
+        if args["type"] == "doc":
+            return {"error": "Тип doc — сырой текст присланного файла, его не правят: "
+                             "это исходник, на который ссылаются другие записи."}
+        return await memory.edit_memory(
+            tenant_id, args["type"], args["old_string"], args["new_string"],
+            slug=args.get("slug"), source=args.get("source"))
     if name == "load_skill":
         body = await memory.load_skill(args["title"])
         return {"title": args["title"], "content": body} if body else {"error": "скилл не найден"}
