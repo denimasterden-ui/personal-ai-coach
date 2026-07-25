@@ -54,11 +54,16 @@ def _read_text(path) -> str:
 # Single-file types (append/replace a whole file) vs per-entry types (one file
 # per slug in a subdir). Keeps the model's `type` argument small and explicit.
 _SINGLE_FILE = {"self", "open_loops", "evidence"}
-_PER_ENTRY = {"pattern", "coach", "decision", "session"}
-_SUBDIR = {"pattern": "patterns", "coach": "coach", "decision": "decisions", "session": "sessions"}
+_PER_ENTRY = {"pattern", "coach", "decision", "session", "test", "doc"}
+_SUBDIR = {"pattern": "patterns", "coach": "coach", "decision": "decisions",
+           "session": "sessions", "test": "tests", "doc": "docs"}
 
 _STOPWORDS = {"и", "в", "на", "по", "за", "с", "от", "для", "что", "как", "это", "к", "у",
               "the", "a", "of", "to", "is", "in", "it"}
+
+# How many lines of a docs/<slug>.md document to show in recall's stub — enough
+# to hint what's inside, not enough to flood context.
+_DOC_PREVIEW_LINES = 5
 
 
 def _slug(text: str) -> str:
@@ -92,21 +97,26 @@ def _resolve(tenant_id: str, mem_type: str, slug: str | None):
 
 # ── write (with curator) ─────────────────────────────────────────────────────
 
-def _write_sync(tenant_id, mem_type, slug, content, supersedes, mode):
+def _write_sync(tenant_id, mem_type, slug, content, supersedes, mode, source):
     path = _resolve(tenant_id, mem_type, slug)
     path.parent.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     new = content.strip()
+    # provenance: where this assertion came from (test result, user's words in
+    # a session, coach's inference, profile seed...). Without it the model can't
+    # tell a measured fact from a guess, so it's recorded next to the content.
+    # None → no line, keeping the old (pre-provenance) file shape.
+    provenance = f"_source: {' '.join(source.split())}_\n\n" if source else ""
     # single-file types (self/open_loops/evidence): mode="append" grows the file
     # (so a profile sent in fragments accumulates instead of overwriting itself),
     # mode="replace" rewrites it whole. per-entry types are one file per slug —
     # a save just replaces that slug's file, mode doesn't apply.
     if mem_type in _SINGLE_FILE and mode == "append" and path.exists():
         existing = _read_text(path).rstrip()
-        body = f"{existing}\n\n---\n\n{new}\n\n_updated: {stamp}_\n"
+        body = f"{existing}\n\n---\n\n{new}\n\n{provenance}_updated: {stamp}_\n"
         action = "appended"
     else:
-        body = f"{new}\n\n_updated: {stamp}_\n"
+        body = f"{new}\n\n{provenance}_updated: {stamp}_\n"
         action = "replaced" if mem_type in _SINGLE_FILE else "saved"
     _write_text(path, body)
     # curator: drop superseded per-entry files
@@ -122,10 +132,10 @@ def _write_sync(tenant_id, mem_type, slug, content, supersedes, mode):
     return {action: f"{mem_type}/{slug}" if slug else mem_type, "superseded": removed}
 
 
-async def save_memory(tenant_id, mem_type, content, slug=None, supersedes=None, mode="append"):
+async def save_memory(tenant_id, mem_type, content, slug=None, supersedes=None, mode="append", source=None):
     try:
         return await asyncio.to_thread(
-            _write_sync, tenant_id, mem_type, slug, content, supersedes, mode
+            _write_sync, tenant_id, mem_type, slug, content, supersedes, mode, source
         )
     except Exception as exc:
         log.warning("save_memory(%s/%s) failed: %s", mem_type, slug, exc)
@@ -140,6 +150,17 @@ def _iter_md(d):
     for p in d.rglob("*.md"):
         if p.is_file():
             yield p
+
+
+def _doc_stub(slug, text, rel):
+    """A `docs/` source document can run to tens of thousands of chars — putting
+    its full text in recall's output would crowd out everything else. Score is
+    computed against the whole text (so the document is discoverable), but we
+    return only a preview + how to fetch the whole thing: load_doc(slug)."""
+    preview = text.strip().splitlines()
+    preview = "\n".join(preview[:_DOC_PREVIEW_LINES]).strip()
+    return {"path": rel, "content": f"[документ {slug}]\n{preview}\n\n…полную выдачу запроси: load_doc(\"{slug}\")",
+            "doc": True, "slug": slug}
 
 
 def _recall_sync(tenant_id, query, limit):
@@ -159,9 +180,16 @@ def _recall_sync(tenant_id, query, limit):
             score = max(score, 1)
         if score:
             rel = str(p.relative_to(d))
-            scored.append((score, rel, text.strip()))
+            scored.append((score, rel, text, p))
     scored.sort(key=lambda s: s[0], reverse=True)
-    return [{"path": rel, "content": text} for _, rel, text in scored[:limit]]
+    out = []
+    for _, rel, text, p in scored[:limit]:
+        # docs/<slug>.md: keep full text out of recall, surface a stub instead
+        if p.parent.name == "docs":
+            out.append(_doc_stub(p.stem, text, rel))
+        else:
+            out.append({"path": rel, "content": text.strip()})
+    return out
 
 
 async def recall(tenant_id, query, limit=5):
@@ -170,6 +198,23 @@ async def recall(tenant_id, query, limit=5):
     except Exception as exc:
         log.warning("recall(%r) failed: %s", query, exc)
         return []
+
+
+def _load_doc_sync(tenant_id, slug):
+    """Fetch a source document whole by its slug. recall only shows a preview;
+    the model gets the rest on demand via load_doc."""
+    path = _resolve(tenant_id, "doc", slug)
+    if not path.exists():
+        return None
+    return _read_text(path).strip()
+
+
+async def load_doc(tenant_id, slug):
+    try:
+        return await asyncio.to_thread(_load_doc_sync, tenant_id, slug)
+    except Exception as exc:
+        log.warning("load_doc(%s) failed: %s", slug, exc)
+        return None
 
 
 # ── user-facing memory ops (bot commands: /memory, /export, /delete_my_data) ──
@@ -200,7 +245,8 @@ def _summarize_sync(tenant_id):
     if loops:
         parts.append("## Открытые темы\n\n" + loops)
     counts = []
-    for sub, label in (("patterns", "паттернов"), ("decisions", "решений"), ("sessions", "сессий")):
+    for sub, label in (("patterns", "паттернов"), ("decisions", "решений"), ("sessions", "сессий"),
+                       ("tests", "результатов тестов"), ("docs", "документов")):
         sd = d / sub
         n = sum(1 for _ in sd.glob("*.md")) if sd.is_dir() else 0
         if n:

@@ -17,3 +17,10 @@ deploy/deploy.env
 # engagement analytics (hashed tenant, no message content — still local-only)
 analytics.db
 analytics.db-*
+
+# supervision store (encrypted coaching content — same class as sessions.pkl)
+supervision.db
+supervision.db-*
+
+# harness delegate artefacts (ТЗ, логи прогонов)
+.harness/
