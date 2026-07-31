@@ -54,9 +54,9 @@ def _read_text(path) -> str:
 # Single-file types (append/replace a whole file) vs per-entry types (one file
 # per slug in a subdir). Keeps the model's `type` argument small and explicit.
 _SINGLE_FILE = {"self", "open_loops", "evidence"}
-_PER_ENTRY = {"pattern", "coach", "decision", "session", "test", "doc"}
+_PER_ENTRY = {"pattern", "coach", "decision", "session", "test", "doc", "loop"}
 _SUBDIR = {"pattern": "patterns", "coach": "coach", "decision": "decisions",
-           "session": "sessions", "test": "tests", "doc": "docs"}
+           "session": "sessions", "test": "tests", "doc": "docs", "loop": "loops"}
 
 _STOPWORDS = {"и", "в", "на", "по", "за", "с", "от", "для", "что", "как", "это", "к", "у",
               "the", "a", "of", "to", "is", "in", "it"}
@@ -97,11 +97,41 @@ def _resolve(tenant_id: str, mem_type: str, slug: str | None):
 
 # ── write (with curator) ─────────────────────────────────────────────────────
 
-def _write_sync(tenant_id, mem_type, slug, content, supersedes, mode, source):
+def _reject_system_lines(text, where):
+    """Refuse a body the model seeded with its own _source:/_updated:/_status:
+    line. Those are system-written; a forged one (the model's made-up _updated:
+    date) lands above the real footer and reads as the freshest truth. Costs one
+    retry, buys an un-forged file."""
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith(("_updated:", "_source:", "_status:")):
+            field = s.split(":", 1)[0]
+            raise ValueError(
+                f"запись отклонена: в {where} есть служебная строка '{field}:'. "
+                "Поля _source:, _updated: и _status: проставляет система — "
+                "повтори вызов без неё.")
+
+
+def _write_sync(tenant_id, mem_type, slug, content, supersedes, mode, source, status):
+    # The model used to drop its own "_updated: <made-up date>_" into the body —
+    # sitting above the real footer it read as the freshest truth. _source: and
+    # _updated: are system fields; refuse so the call is retried without them.
+    _reject_system_lines(content, "content")
+    # supersedes on a single-file type is a silent no-op: _resolve returns the very
+    # path being written, so the `sp != path` guard below never unlinks anything,
+    # yet the call reported success. Surface it instead of pretending to curate.
+    if supersedes and mem_type in _SINGLE_FILE:
+        raise ValueError(
+            f"supersedes не применим к типу {mem_type}: это single-file тип (один "
+            f"файл без slug'ов, снимать нечего). Чтобы заменить устаревшее — "
+            "используй mode=\"replace\" или edit_memory.")
     path = _resolve(tenant_id, mem_type, slug)
     path.parent.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     new = content.strip()
+    # loop: a machine-readable status line the code writes (not the model), first
+    # in the body. The loop's identity is its slug now, not its ordinal in a list.
+    status_line = f"_status: {status}_\n\n" if (mem_type == "loop" and status) else ""
     # provenance: where this assertion came from (test result, user's words in
     # a session, coach's inference, profile seed...). Without it the model can't
     # tell a measured fact from a guess, so it's recorded next to the content.
@@ -116,7 +146,7 @@ def _write_sync(tenant_id, mem_type, slug, content, supersedes, mode, source):
         body = f"{existing}\n\n---\n\n{new}\n\n{provenance}_updated: {stamp}_\n"
         action = "appended"
     else:
-        body = f"{new}\n\n{provenance}_updated: {stamp}_\n"
+        body = f"{status_line}{new}\n\n{provenance}_updated: {stamp}_\n"
         action = "replaced" if mem_type in _SINGLE_FILE else "saved"
     _write_text(path, body)
     # curator: drop superseded per-entry files
@@ -132,10 +162,10 @@ def _write_sync(tenant_id, mem_type, slug, content, supersedes, mode, source):
     return {action: f"{mem_type}/{slug}" if slug else mem_type, "superseded": removed}
 
 
-async def save_memory(tenant_id, mem_type, content, slug=None, supersedes=None, mode="append", source=None):
+async def save_memory(tenant_id, mem_type, content, slug=None, supersedes=None, mode="append", source=None, status=None):
     try:
         return await asyncio.to_thread(
-            _write_sync, tenant_id, mem_type, slug, content, supersedes, mode, source
+            _write_sync, tenant_id, mem_type, slug, content, supersedes, mode, source, status
         )
     except Exception as exc:
         log.warning("save_memory(%s/%s) failed: %s", mem_type, slug, exc)
@@ -223,6 +253,7 @@ def _edit_sync(tenant_id, mem_type, slug, old, new, source):
     leaving it above the correction (the model then sees both) or regenerating
     tens of KB of profile. Uniqueness is required: an ambiguous match would edit
     a place the model didn't mean."""
+    _reject_system_lines(new, "new_string")
     path = _resolve(tenant_id, mem_type, slug)
     if not path.exists():
         return {"error": f"нет такой записи: {mem_type}" + (f"/{slug}" if slug else "")}

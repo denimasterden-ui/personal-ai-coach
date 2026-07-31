@@ -6,7 +6,7 @@ and when to save; isolation/curator are enforced inside memory.py, not here.
 import memory
 
 MEM_TYPES = ["self", "pattern", "coach", "open_loops", "evidence", "decision", "session",
-             "test", "doc"]
+             "test", "doc", "loop"]
 
 TOOL_SCHEMAS = [
     {
@@ -44,15 +44,16 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "type": {"type": "string", "enum": MEM_TYPES,
                              "description": "self/open_loops/evidence — один файл; "
-                             "pattern/coach/decision/session/test/doc — по slug. "
+                             "pattern/coach/decision/session/test/doc/loop — по slug. "
                              "test — результат психометрического теста (инструмент, дата, расклад) "
                              "и твой разбор этого результата — сюда, целиком попадает в recall; "
                              "doc — сырой текст присланного файла, его пишет бот, тебе писать туда "
-                             "нельзя (recall отдаёт по нему только превью, целиком — load_doc(slug))."},
+                             "нельзя (recall отдаёт по нему только превью, целиком — load_doc(slug)); "
+                             "loop — открытая петля со статусом (обязателен status: open/done/dropped)."},
                     "content": {"type": "string", "description": "Содержимое в markdown"},
                     "mode": {"type": "string", "enum": ["append", "replace"],
                              "description": "Только для single-file типов: дополнить или переписать целиком. По умолчанию append."},
-                    "slug": {"type": "string", "description": "Короткий идентификатор для pattern/coach/decision/session"},
+                    "slug": {"type": "string", "description": "Короткий идентификатор для pattern/coach/decision/session/loop"},
                     "supersedes": {"type": "array", "items": {"type": "string"},
                                    "description": "slug'и устаревших записей того же типа, которые заменяет эта"},
                     "source": {"type": "string",
@@ -60,6 +61,9 @@ TOOL_SCHEMAS = [
                                "сессии, твой вывод/гипотеза, профиль при онбординге и т.п. Без источника факт "
                                "и гипотеза лежат неотличимо — указывай, чтобы не ссылаться на проверенное то, "
                                "что им не является."},
+                    "status": {"type": "string", "enum": ["open", "done", "dropped"],
+                               "description": "Только для type=loop: состояние петли — open (открыта), "
+                               "done (выполнена), dropped (брошена). Обязателен для loop."},
                 },
                 "required": ["type", "content", "source"],
             },
@@ -155,10 +159,20 @@ async def dispatch(name, args, tenant_id):
             return {"error": f"Запись отклонена: для типа {args['type']} нужен slug — "
                              "без него запись затрёт предыдущую. Дай короткий "
                              "идентификатор (например clifton-2021, uhod-iz-pizzy)."}
+        # loop carries a machine-readable status; a loop's identity is its slug, not
+        # its ordinal in a numbered list. Validated here (a schema enum is advisory
+        # and gets skipped under load — same lesson as the source gate).
+        if args["type"] == "loop":
+            status = (args.get("status") or "").strip()
+            if status not in {"open", "done", "dropped"}:
+                return {"error": f"Запись отклонена: для петли (type=loop) нужен status — "
+                                 f"один из open (открыта), done (выполнена), dropped "
+                                 f"(брошена). Получено {status!r}. Повтори вызов."}
         return await memory.save_memory(
             tenant_id, args["type"], args["content"],
             slug=args.get("slug"), supersedes=args.get("supersedes"),
             mode=args.get("mode", "append"), source=args.get("source"),
+            status=args.get("status"),
         )
     if name == "edit_memory":
         if not (args.get("source") or "").strip():
