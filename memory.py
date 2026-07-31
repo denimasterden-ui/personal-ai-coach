@@ -65,6 +65,12 @@ _STOPWORDS = {"и", "в", "на", "по", "за", "с", "от", "для", "чт�
 # to hint what's inside, not enough to flood context.
 _DOC_PREVIEW_LINES = 5
 
+# The always-on open-loops channel is capped by volume, not count — like Letta's
+# char_limit on a memory block. ~1000 tokens for Russian (≈4 char/token); the real
+# token length surfaces in /stats (T5) to calibrate this. Char count keeps a
+# tokenizer out of recall's hot path.
+_OPEN_LOOPS_CHAR_CAP = 4000
+
 
 def _slug(text: str) -> str:
     s = re.sub(r"[^a-zA-Z0-9а-яА-Я_-]+", "-", text.strip().lower()).strip("-")
@@ -193,11 +199,60 @@ def _doc_stub(slug, text, rel):
             "doc": True, "slug": slug}
 
 
+def _parse_updated(text):
+    """ISO stamp from a memory footer (_updated: <iso>_). Falls back to '' so a
+    missing stamp sorts oldest, not crashes. Stamps are written by the code
+    (save_memory) in one isoformat, so they compare correctly as strings."""
+    m = re.search(r"_updated:\s*(\S+?)_", text)
+    return m.group(1) if m else ""
+
+
+def _open_loops_channel(d):
+    """Always-on context: every open loop, score-independent. A loop's status is a
+    code-written machine field (_status: open_), so 'open' is a filter, not a search
+    — these loops compete for no query-scored slot. Done/dropped loops stay
+    query-relevant and ride the normal top-K below. Capped by chars, freshest first:
+    on overflow the older loops collapse into a stub so the model knows the channel
+    was truncated, not exhaustive (silent truncation is exactly the bug we're fixing).
+    Returns (channel_entries, open_paths); open_paths lets _recall_sync skip them in
+    the query pass so an open loop isn't returned twice."""
+    loops_dir = d / "loops"
+    if not loops_dir.is_dir():
+        return [], set()
+    open_loops = []
+    for p in loops_dir.glob("*.md"):
+        try:
+            text = _read_text(p)
+        except Exception as exc:  # unreadable (wrong/missing key) — skip, don't poison recall
+            log.warning("recall: unreadable %s: %s", p, exc)
+            continue
+        first = text.lstrip().splitlines()[0].strip() if text.strip() else ""
+        if first == "_status: open_":
+            open_loops.append((_parse_updated(text), str(p.relative_to(d)), text.strip()))
+    open_loops.sort(key=lambda s: s[0], reverse=True)  # freshest first
+    out, used, cut = [], 0, 0
+    for _stamp, rel, body in open_loops:
+        if used + len(body) <= _OPEN_LOOPS_CHAR_CAP:
+            out.append({"path": rel, "content": body})
+            used += len(body)
+        else:
+            cut += 1
+    if cut:
+        out.append({"path": "loops/", "content":
+                    f"…+ ещё {cut} открытых петель (старее). Уточни конкретику или /memory."})
+    return out, {rel for _s, rel, _b in open_loops}
+
+
 def _recall_sync(tenant_id, query, limit):
     d = _tenant_dir(tenant_id)
     tokens = [t for t in re.findall(r"\w+", query.lower()) if len(t) >= 3 and t not in _STOPWORDS]
+    # open loops are always-on context (first in output, score-independent);
+    # excluded from the query pass below so they aren't returned twice.
+    open_channel, open_paths = _open_loops_channel(d)
     scored = []
     for p in _iter_md(d):
+        if str(p.relative_to(d)) in open_paths:
+            continue
         try:
             text = _read_text(p)
         except Exception as exc:  # incl. cryptography.fernet.InvalidToken (wrong/missing key)
@@ -212,7 +267,7 @@ def _recall_sync(tenant_id, query, limit):
             rel = str(p.relative_to(d))
             scored.append((score, rel, text, p))
     scored.sort(key=lambda s: s[0], reverse=True)
-    out = []
+    out = list(open_channel)
     for _, rel, text, p in scored[:limit]:
         # docs/<slug>.md: keep full text out of recall, surface a stub instead
         if p.parent.name == "docs":
