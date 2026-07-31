@@ -94,6 +94,21 @@ async def test_freshness_wins_on_truncation(tmp_path):
         "при нехватке места остаётся свежая петля, старая отсекается"
 
 
+async def test_edited_loop_keeps_its_freshness(tmp_path):
+    """edit_memory пишет футер в другой форме — `_updated: <iso> (правка: …)_`.
+    Если разбор штампа её не понимает, поправленная петля читается как недатированная
+    и отсекается первой, хотя она самая свежая."""
+    big = "очень длинное содержание петли " * 80
+    await _loop("edited", "open", big + " ЗАМЕНИТЬ")
+    await _loop("other", "open", big)
+    _age_loop("other")
+    await memory.edit_memory(TENANT, "loop", "ЗАМЕНИТЬ", "исправлено",
+                             slug="edited", source="слова человека")
+    hits = await memory.recall(TENANT, "несуществующееслово")
+    assert [h["path"] for h in _loops(hits)] == ["loops/edited.md"], \
+        "поправленная петля — самая свежая, отсекаться должна не она"
+
+
 async def test_done_dropped_not_in_always_on_channel(tmp_path):
     """done/dropped — обычный query-relevant контент, в always-on блок не попадают.
     По нерелевантному запросу готовой петли в выдаче нет."""

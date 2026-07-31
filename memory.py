@@ -200,10 +200,13 @@ def _doc_stub(slug, text, rel):
 
 
 def _parse_updated(text):
-    """ISO stamp from a memory footer (_updated: <iso>_). Falls back to '' so a
-    missing stamp sorts oldest, not crashes. Stamps are written by the code
-    (save_memory) in one isoformat, so they compare correctly as strings."""
-    m = re.search(r"_updated:\s*(\S+?)_", text)
+    """ISO stamp from a memory footer. Falls back to '' so a missing stamp sorts
+    oldest, not crashes. Stamps are written by the code (save_memory) in one
+    isoformat, so they compare correctly as strings. Two footer shapes exist:
+    `_updated: <iso>_` after a save and `_updated: <iso> (правка: …)_` after an
+    edit — match the ISO characters themselves, or a corrected loop reads as
+    undated and sinks to the bottom of the channel, exactly backwards."""
+    m = re.search(r"_updated:\s*([0-9T:+.\-]+)", text)
     return m.group(1) if m else ""
 
 
