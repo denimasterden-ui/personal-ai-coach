@@ -241,7 +241,7 @@ async def _drain(chat_id, timeout=5.0):
 async def test_markdown_transcript_is_accepted(tg):
     """A session transcript is as legitimate a source for a profile claim as a
     PDF report; refusing .md sent the user back to copy-pasting."""
-    body = "# Разбор 2021\n\nкоуч: ...\nденис: ..."
+    body = "# Разбор 2021\n\nкоуч: ...\nклиент: ..."
     await bot._handle(FakeClient(body.encode("utf-8")),
                       _msg(file_name="transcript.md", mime_type="text/markdown"))
     stored = await memory.load_doc(bot._tenant_id_for(7), memory._slug("transcript.md"))

@@ -24,3 +24,6 @@ supervision.db-*
 
 # harness delegate artefacts (ТЗ, логи прогонов)
 .harness/
+
+# macOS
+.DS_Store
