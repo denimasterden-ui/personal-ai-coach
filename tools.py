@@ -33,7 +33,7 @@ TOOL_SCHEMAS = [
             "name": "save_memory",
             "description": (
                 "Запиши/обнови память о пользователе, чтобы профиль рос между сессиями. "
-                "Для single-file типов (self/open_loops/evidence) выбирай mode: 'append' — "
+                "Для single-file типов (self/evidence) выбирай mode: 'append' — "
                 "дополнить существующее (по умолчанию; важно, если профиль приходит частями — "
                 "не затирай уже записанное), 'replace' — переписать файл целиком (когда факт "
                 "устарел/изменился). Для pattern/coach/decision/session указывай slug; supersedes — "
@@ -43,13 +43,14 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "type": {"type": "string", "enum": MEM_TYPES,
-                             "description": "self/open_loops/evidence — один файл; "
+                             "description": "self/evidence — один файл; "
                              "pattern/coach/decision/session/test/doc/loop — по slug. "
                              "test — результат психометрического теста (инструмент, дата, расклад) "
                              "и твой разбор этого результата — сюда, целиком попадает в recall; "
                              "doc — сырой текст присланного файла, его пишет бот, тебе писать туда "
                              "нельзя (recall отдаёт по нему только превью, целиком — load_doc(slug)); "
-                             "loop — открытая петля со статусом (обязателен status: open/done/dropped)."},
+                             "loop — открытая петля со статусом (обязателен status: open/done/dropped); "
+                             "open_loops устарел и недоступен для записи/правок — используй loop."},
                     "content": {"type": "string", "description": "Содержимое в markdown"},
                     "mode": {"type": "string", "enum": ["append", "replace"],
                              "description": "Только для single-file типов: дополнить или переписать целиком. По умолчанию append."},
@@ -155,6 +156,19 @@ async def dispatch(name, args, tenant_id):
                              "сохраняет бот. Свой разбор результата теста сохраняй "
                              "типом test: он попадает в recall целиком, а doc — "
                              "только превью."}
+        # open_loops is a deprecated write path. It was a numbered list where the
+        # ordinal posed as an identifier and bred duplicates (case PROD-1); the live
+        # run showed the model keeps falling back here under load even with a playbook
+        # rule telling it to use loop. A schema description is advisory — a hard
+        # refusal is the only thing that held (same lesson as the source/slug gates).
+        # The type stays in the enum so recall can still read legacy open_loops.md.
+        if args["type"] == "open_loops":
+            return {"error": "Тип open_loops устарел для записи коучем — нумерованный "
+                             "перечень плодил дубли и ложные ссылки по номеру (кейс "
+                             "PROD-1). Новую открытую петлю или тему записывай типом "
+                             "loop (с обязательным status: open/done/dropped); факт "
+                             "профиля — типом self или coach. Старый open_loops в "
+                             "recall доступен только на чтение."}
         if args["type"] in memory._PER_ENTRY and not (args.get("slug") or "").strip():
             return {"error": f"Запись отклонена: для типа {args['type']} нужен slug — "
                              "без него запись затрёт предыдущую. Дай короткий "
@@ -181,6 +195,10 @@ async def dispatch(name, args, tenant_id):
         if args["type"] == "doc":
             return {"error": "Тип doc — сырой текст присланного файла, его не правят: "
                              "это исходник, на который ссылаются другие записи."}
+        if args["type"] == "open_loops":
+            return {"error": "Тип open_loops устарел для правок коучем — закрой или "
+                             "обнови петлю через type=loop (status: open/done/dropped), "
+                             "а факт профиля правь в self/coach."}
         return await memory.edit_memory(
             tenant_id, args["type"], args["old_string"], args["new_string"],
             slug=args.get("slug"), source=args.get("source"))

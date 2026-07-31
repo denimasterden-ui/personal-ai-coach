@@ -152,11 +152,12 @@ async def test_slugless_per_entry_save_is_refused(tmp_path, monkeypatch):
 
 
 async def test_single_file_types_still_need_no_slug(tmp_path, monkeypatch):
-    """self/open_loops/evidence are one file each — demanding a slug there would
-    break every ordinary profile write."""
+    """self/evidence are one file each — demanding a slug there would break every
+    ordinary profile write. open_loops is excluded: it's deprecated as a coach
+    write path (T5b gate in tools.dispatch)."""
     import tools
     monkeypatch.setattr(memory.config, "TENANTS_DIR", tmp_path)
-    for kind in sorted(memory._SINGLE_FILE):
+    for kind in sorted(memory._SINGLE_FILE - {"open_loops"}):
         res = await tools.dispatch(
             "save_memory", {"type": kind, "content": "x", "source": "сессия"}, "t1")
         assert "error" not in res, kind
