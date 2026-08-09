@@ -128,6 +128,12 @@ TOOL_SCHEMAS = [
     },
 ]
 
+# Tool sets for turn vs recollect pass (aicoach-dev#10, ADR 0005).
+# Coach has no write tools during the turn — not "not recommended", but absent.
+# Pass has write tools + recall for dedup, but no skill/doc loading.
+TURN_TOOLS = [s for s in TOOL_SCHEMAS if s["function"]["name"] in {"recall", "load_skill", "load_doc"}]
+PASS_TOOLS = [s for s in TOOL_SCHEMAS if s["function"]["name"] in {"recall", "save_memory", "edit_memory"}]
+
 
 async def dispatch(name, args, tenant_id):
     if name == "recall":

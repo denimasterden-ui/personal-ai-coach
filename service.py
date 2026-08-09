@@ -1,7 +1,8 @@
 """AICOACH: personal coaching brain. One endpoint. A bare Claude with a coaching
-skill and hands to its own memory (recall / save_memory / load_skill) — the model
-runs the conversation freely and decides when to remember and when to write. No
-deterministic pipe, no data/sandbox tools.
+skill and hands to its own memory (recall / load_skill / load_doc) — the model
+runs the conversation freely. Memory writes happen in a separate background pass
+after the answer is delivered (recollect module, ADR 0005), not during the turn.
+No deterministic pipe, no data/sandbox tools.
 
 Trimmed fork of ops-agent/service.py: kept the SSE stream, prompt caching, the
 tool-loop and per-turn context compaction; dropped run_python/sandbox/discover,
@@ -23,6 +24,7 @@ from pydantic import BaseModel
 
 import config
 import memory
+import recollect
 import supervision
 import tools
 
@@ -148,12 +150,9 @@ async def _build_system_prompt():
     return (
         playbook
         + "\n\n---\n\n# Память пользователя\n"
-        "У тебя есть инструменты к личной памяти этого пользователя. Зови `recall` в начале "
-        "разбора и когда нужен контекст о человеке; записывай важные выводы/паттерны/решения через "
-        "`save_memory`, чтобы профиль рос между сессиями. Для self/evidence используй "
-        "mode='append', чтобы дополнять (не затирать уже записанное — особенно если пользователь "
-        "присылает профиль частями), и mode='replace' только когда факт устарел и его надо переписать. "
-        "Указывай `supersedes`, если уточняешь старую запись.\n\n"
+        "У тебя есть инструмент к личной памяти этого пользователя. Зови `recall` в начале "
+        "разбора и когда нужен контекст о человеке. Запись памяти происходит отдельно, после "
+        "твоего ответа — не записывай ничего во время хода.\n\n"
         "# Дополнительные скиллы (вызови load_skill(title) за полным текстом)\n\n"
         + catalog_doc
     )
@@ -200,7 +199,7 @@ async def _run_inner(req: SessionRequest):
         response = await _client.chat.completions.create(
             model=model_id,
             messages=_with_cache_control(messages),
-            tools=tools.TOOL_SCHEMAS,
+            tools=tools.TURN_TOOLS,
             max_tokens=MAX_OUTPUT_TOKENS,
             extra_body=_EXTRA_BODY,
         )
@@ -216,6 +215,11 @@ async def _run_inner(req: SessionRequest):
             supervision.capture_async(req.tenant_id, req.message, answer,
                                       skill=skill_used, tools_used=used_tools)
             yield _sse("answer", {"text": answer})
+            # Memory extraction pass — fire-and-forget after answer is delivered.
+            # The coach has no write tools during the turn; this pass decides what
+            # to remember (aicoach-dev#10, ADR 0005).
+            recollect.after_turn_async(req.tenant_id, req.message, answer,
+                                       client=_client, model=model_id)
             return
 
         messages.append(message.model_dump(exclude_none=True))
@@ -265,6 +269,9 @@ async def _run_inner(req: SessionRequest):
     supervision.capture_async(req.tenant_id, req.message, answer, skill=skill_used,
                               tools_used=used_tools, budget_exhausted=True)
     yield _sse("answer", {"text": answer})
+    # Memory extraction pass — fire-and-forget after answer is delivered.
+    recollect.after_turn_async(req.tenant_id, req.message, answer,
+                               client=_client, model=model_id)
 
 
 @app.post("/session")
