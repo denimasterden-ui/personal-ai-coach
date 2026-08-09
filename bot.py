@@ -271,9 +271,10 @@ async def _ask_brain(client, tenant_id, session_id, text, model=None) -> str:
                 data = json.loads(line[6:])
                 if event == "answer":
                     answer = data.get("text", "")
-                elif event == "tool_call" and data.get("name") == "save_memory":
-                    mtype = (data.get("args") or {}).get("type")
-                    analytics.log("memory_write", tenant_id, mtype=mtype)
+                # memory_write analytics removed (aicoach-dev#11): after #10 moved
+                # memory writes to the recollect pass, the coach no longer calls
+                # save_memory, so this listener never fires. Memory write stats
+                # now come from supervision.pass_stats() instead.
     return answer or "(пустой ответ)"
 
 

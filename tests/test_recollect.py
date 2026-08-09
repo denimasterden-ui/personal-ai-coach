@@ -323,3 +323,88 @@ async def test_explicit_write_request(isolated):
     assert decision_file.exists(), "explicit write request produced a write"
     content = decision_file.read_text(encoding="utf-8")
     assert "уволить подрядчика" in content
+
+
+# ── passes trace (aicoach-dev#11) ────────────────────────────────────────────
+# These verify that the recollect pass logs its activity to supervision.passes.
+
+
+async def test_pass_summary_reports_writes(isolated):
+    """_run_pass_inner returns a summary with tool_names, write_count, etc."""
+    import recollect
+
+    client = FakeClient([
+        # Step 1: recall
+        FakeMessage(content="проверяю", tool_calls=[_call("recall", {"query": "паттерн"})]),
+        # Step 2: save_memory (success)
+        FakeMessage(content="записываю", tool_calls=[_call("save_memory", {
+            "type": "pattern", "slug": "test-pattern",
+            "content": "тестовый паттерн",
+            "source": "слова человека в сессии",
+        })]),
+        # Step 3: done
+        FakeMessage(content="готово"),
+    ])
+
+    summary = await recollect._run_pass_inner(
+        "t1", "сообщение", "ответ",
+        client=client, model="test-model"
+    )
+
+    assert summary["tool_names"] == ["recall", "save_memory"]
+    assert summary["write_count"] == 1
+    assert summary["write_attempts"] == 1
+    assert summary["recall_count"] == 1
+
+
+async def test_pass_logs_to_supervision(isolated, monkeypatch):
+    """After the pass completes, supervision.passes contains a record."""
+    import recollect
+    import supervision
+
+    # Mock log_pass_async to capture calls
+    logged = []
+
+    def mock_log_pass_async(*args, **kwargs):
+        logged.append({"args": args, "kwargs": kwargs})
+
+    monkeypatch.setattr(supervision, "log_pass_async", mock_log_pass_async)
+
+    client = FakeClient([
+        FakeMessage(content="записываю", tool_calls=[_call("save_memory", {
+            "type": "pattern", "slug": "logged-pattern",
+            "content": "паттерн для лога",
+            "source": "слова человека в сессии",
+        })]),
+        FakeMessage(content="готово"),
+    ])
+
+    await recollect._run_pass("t1", "сообщение", "ответ", client=client, model="test-model")
+
+    assert len(logged) == 1
+    assert logged[0]["args"][0] == "t1"  # tenant_id is positional
+    assert logged[0]["kwargs"]["write_count"] == 1
+    assert logged[0]["kwargs"]["crashed"] is False
+
+
+async def test_pass_crash_logs_to_supervision(isolated, monkeypatch):
+    """A crashed pass logs crashed=1 with error message."""
+    import recollect
+    import supervision
+
+    logged = []
+
+    def mock_log_pass_async(*args, **kwargs):
+        logged.append({"args": args, "kwargs": kwargs})
+
+    monkeypatch.setattr(supervision, "log_pass_async", mock_log_pass_async)
+
+    # Client that raises on first call
+    client = FakeClient([RuntimeError("pass crashed mid-flight")])
+
+    await recollect._run_pass("t1", "сообщение", "ответ", client=client, model="test-model")
+
+    assert len(logged) == 1
+    assert logged[0]["kwargs"]["crashed"] is True
+    assert "pass crashed mid-flight" in logged[0]["kwargs"]["error"]
+    assert logged[0]["kwargs"]["write_count"] == 0

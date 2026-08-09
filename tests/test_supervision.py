@@ -5,6 +5,7 @@ that must not drift: too loose and we hoard разборы we said we wouldn't, 
 and the critic starves.
 """
 import asyncio
+import sqlite3
 import time
 
 import pytest
@@ -47,9 +48,10 @@ def test_short_answer_to_substantial_input_is_captured(db):
     assert "short_answer" in r
 
 
-def test_no_memory_write_on_substantial_input_is_captured(db):
-    r = supervision.reasons_for("other", len(LONG), 3000, ["recall"], False)
-    assert "no_memory_write" in r
+# test_no_memory_write_on_substantial_input_is_captured removed (aicoach-dev#11):
+# after #10 moved memory writes to the recollect pass, the coach never calls
+# save_memory, so this signal would fire on every turn. The signal now lives
+# in pass_stats() instead — see test_pass_stats_counts_no_write below.
 
 
 def test_trivial_input_does_not_trip_signals(db):
@@ -165,3 +167,62 @@ def test_purge_drops_old_cases_only(db):
                   "VALUES (?, ?, 'old', 'budget', 1, 1, ?)", (time.time(), old_day, b"{}"))
     assert supervision.purge(days=90) == 1
     assert supervision.pending()[0]["id"] == fresh_id
+
+
+# ── passes (memory extraction pass trace, aicoach-dev#11) ─────────────────────
+
+
+def test_log_pass_roundtrip(db):
+    """log_pass writes to passes table with correct fields."""
+    supervision.log_pass("alice", tool_names=["recall", "save_memory"],
+                         write_count=1, write_attempts=1, recall_count=1,
+                         user_text="сообщение", answer="ответ")
+    with supervision._conn() as c:
+        c.row_factory = sqlite3.Row
+        row = c.execute("SELECT * FROM passes WHERE tenant = ?", ("alice",)).fetchone()
+    assert row is not None
+    assert row["write_count"] == 1
+    assert row["write_attempts"] == 1
+    assert row["recall_count"] == 1
+    assert row["crashed"] == 0
+    assert row["tool_names"] == "recall,save_memory"
+
+
+def test_log_pass_crashed(db):
+    """A crashed pass logs crashed=1 with error message."""
+    supervision.log_pass("bob", crashed=True, error="RuntimeError: pass failed")
+    with supervision._conn() as c:
+        c.row_factory = sqlite3.Row
+        row = c.execute("SELECT * FROM passes WHERE tenant = ?", ("bob",)).fetchone()
+    assert row["crashed"] == 1
+    assert "RuntimeError" in row["error"]
+
+
+def test_log_pass_never_raises(db, monkeypatch):
+    """log_pass swallows exceptions — a failed log must not cost a turn."""
+    monkeypatch.setattr(supervision, "DB_FILE", tmp_path := __import__("pathlib").Path("/nonexistent"))
+    # Should not raise
+    supervision.log_pass("alice", write_count=1)
+
+
+def test_pass_stats_counts_no_write(db):
+    """pass_stats reports passes that ran but wrote nothing (the new signal)."""
+    supervision.log_pass("alice", write_count=0, write_attempts=0)
+    supervision.log_pass("alice", write_count=1, write_attempts=1)
+    supervision.log_pass("bob", write_count=0, write_attempts=0)
+    supervision.log_pass("bob", crashed=True, error="fail")
+    stats = supervision.pass_stats(days=1)
+    assert stats["total"] == 4
+    assert stats["no_write"] == 2  # alice + bob (crashed doesn't count)
+    assert stats["crashed"] == 1
+
+
+def test_pass_stats_by_tenant(db):
+    """pass_stats groups by tenant with write count."""
+    supervision.log_pass("alice", write_count=1, write_attempts=1)
+    supervision.log_pass("alice", write_count=0, write_attempts=0)
+    supervision.log_pass("bob", write_count=2, write_attempts=2)
+    stats = supervision.pass_stats(days=1)
+    by_tenant = {t: (total, writes) for t, total, writes in stats["by_tenant"]}
+    assert by_tenant["alice"] == (2, 1)  # 2 passes, 1 with writes
+    assert by_tenant["bob"] == (1, 1)

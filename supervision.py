@@ -47,6 +47,22 @@ CREATE TABLE IF NOT EXISTS cases (
 );
 CREATE INDEX IF NOT EXISTS idx_cases_reviewed ON cases(reviewed);
 CREATE INDEX IF NOT EXISTS idx_cases_day      ON cases(day);
+
+CREATE TABLE IF NOT EXISTS passes (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts             REAL NOT NULL,
+    day            INTEGER NOT NULL,
+    tenant         TEXT NOT NULL,
+    tool_names     TEXT,                -- CSV: recall,save_memory,edit_memory
+    write_count    INTEGER DEFAULT 0,   -- successful save/edit calls
+    write_attempts INTEGER DEFAULT 0,   -- total save/edit attempts
+    recall_count   INTEGER DEFAULT 0,
+    crashed        INTEGER DEFAULT 0,   -- 0/1
+    error          TEXT,                -- if crashed=1
+    payload        BLOB                 -- Fernet(json{user, answer, summary}) or plain
+);
+CREATE INDEX IF NOT EXISTS idx_passes_tenant ON passes(tenant);
+CREATE INDEX IF NOT EXISTS idx_passes_day    ON passes(day);
 """
 
 
@@ -79,8 +95,9 @@ def reasons_for(tenant, user_len, answer_len, tools_used, budget_exhausted):
         out.append("budget")
     if user_len > SUBSTANTIAL_CHARS and answer_len < SHORT_ANSWER_CHARS:
         out.append("short_answer")
-    if user_len > SUBSTANTIAL_CHARS and "save_memory" not in tools_used:
-        out.append("no_memory_write")
+    # no_memory_write removed (aicoach-dev#11): after #10 moved memory writes
+    # to the recollect pass, the coach never calls save_memory, so this signal
+    # would fire on every turn. The signal now lives in pass_stats() instead.
     if not out and random.randint(1, 100) <= SAMPLE_PCT:
         out.append("control")  # keep the critic calibrated on normal sessions too
     return out
@@ -118,6 +135,47 @@ def capture_async(*args, **kwargs):
     service runs a single uvicorn worker, so a sync call here would stall every
     concurrent session. Losing a case on shutdown is an acceptable trade."""
     task = asyncio.create_task(asyncio.to_thread(capture, *args, **kwargs))
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+
+
+def log_pass(tenant, *, tool_names=(), write_count=0, write_attempts=0,
+             recall_count=0, crashed=False, error=None, user_text=None, answer=None):
+    """Log a memory extraction pass. Fire-and-forget: never raises.
+
+    Tracks what the recollect pass did after a coaching turn — which tools it
+    called, how many writes succeeded, whether it crashed. Separate from cases
+    (the coaching turn itself) so the no_memory_write signal can check pass
+    results instead of turn tools (aicoach-dev#11).
+    """
+    try:
+        summary = {
+            "tool_names": list(tool_names),
+            "write_count": write_count,
+            "write_attempts": write_attempts,
+            "recall_count": recall_count,
+        }
+        blob = json.dumps({"user": user_text, "answer": answer, "summary": summary},
+                          ensure_ascii=False).encode()
+        f = _fernet()
+        if f:
+            blob = f.encrypt(blob)
+        now = time.time()
+        with _conn() as c:
+            c.execute(
+                "INSERT INTO passes (ts, day, tenant, tool_names, write_count, "
+                "write_attempts, recall_count, crashed, error, payload) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (now, int(now // 86400), tenant, ",".join(tool_names),
+                 write_count, write_attempts, recall_count, int(crashed), error, blob),
+            )
+    except Exception as exc:
+        print("[supervision] log_pass error:", exc, flush=True)
+
+
+def log_pass_async(*args, **kwargs):
+    """Log pass off the event loop. Like capture_async."""
+    task = asyncio.create_task(asyncio.to_thread(log_pass, *args, **kwargs))
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
 
@@ -179,3 +237,28 @@ def stats():
         ).fetchall()
     return {"total": total, "pending": waiting, "by_reason": by_reason,
             "by_tenant": by_tenant}
+
+
+def pass_stats(days=7):
+    """Stats for memory extraction passes over the last N days.
+
+    The no_memory_write signal now lives here (aicoach-dev#11): a pass that ran
+    but wrote nothing (write_count=0, crashed=0) is the new signal, replacing
+    the old turn-based check that broke after memory writes moved out of the
+    coaching turn (#10).
+    """
+    cutoff = time.time() - days * 86400
+    with _conn() as c:
+        total = c.execute("SELECT COUNT(*) FROM passes WHERE ts > ?", (cutoff,)).fetchone()[0]
+        crashed = c.execute("SELECT COUNT(*) FROM passes WHERE ts > ? AND crashed = 1",
+                            (cutoff,)).fetchone()[0]
+        no_write = c.execute(
+            "SELECT COUNT(*) FROM passes WHERE ts > ? AND write_count = 0 AND crashed = 0",
+            (cutoff,)
+        ).fetchone()[0]
+        by_tenant = c.execute(
+            "SELECT tenant, COUNT(*), SUM(CASE WHEN write_count > 0 THEN 1 ELSE 0 END) "
+            "FROM passes WHERE ts > ? GROUP BY tenant ORDER BY 2 DESC",
+            (cutoff,)
+        ).fetchall()
+    return {"total": total, "crashed": crashed, "no_write": no_write, "by_tenant": by_tenant}

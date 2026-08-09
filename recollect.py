@@ -136,17 +136,50 @@ async def _run_pass(tenant_id, user_text, answer, client, model):
     """Run the extraction pass. Catches all exceptions — a crashed pass is
     logged, not raised. The turn is already complete; this is background."""
     try:
-        await _run_pass_inner(tenant_id, user_text, answer, client, model)
+        summary = await _run_pass_inner(tenant_id, user_text, answer, client, model)
+        crashed = False
+        error = None
     except Exception as exc:
         log.warning("recollect pass failed for %s: %s", tenant_id, exc, exc_info=True)
+        summary = {
+            "tool_names": [],
+            "write_count": 0,
+            "write_attempts": 0,
+            "recall_count": 0,
+        }
+        crashed = True
+        error = str(exc)
+
+    # Trace the pass — fire-and-forget via supervision (aicoach-dev#11)
+    import supervision  # local to avoid cycle at module load
+    supervision.log_pass_async(
+        tenant_id,
+        tool_names=summary["tool_names"],
+        write_count=summary["write_count"],
+        write_attempts=summary["write_attempts"],
+        recall_count=summary["recall_count"],
+        crashed=crashed,
+        error=error,
+        user_text=user_text,
+        answer=answer,
+    )
 
 
 async def _run_pass_inner(tenant_id, user_text, answer, client, model):
-    """Inner pass loop. Separated so the outer wrapper can catch all exceptions."""
+    """Inner pass loop. Separated so the outer wrapper can catch all exceptions.
+
+    Returns a summary dict with tool_names, write_count, write_attempts,
+    recall_count — used by supervision.log_pass to trace what the pass did.
+    """
     messages = [
         {"role": "system", "content": _PASS_PROMPT},
         {"role": "user", "content": f"Сообщение человека:\n{user_text}\n\n---\n\nОтвет коуча:\n{answer}"},
     ]
+
+    tool_names = set()
+    write_count = 0
+    write_attempts = 0
+    recall_count = 0
 
     for step in range(PASS_MAX_STEPS):
         response = await client.chat.completions.create(
@@ -165,9 +198,19 @@ async def _run_pass_inner(tenant_id, user_text, answer, client, model):
         # Execute tool calls and append results.
         for call in message.tool_calls:
             name = call.function.name
+            tool_names.add(name)
             try:
                 args = json.loads(call.function.arguments or "{}")
                 result = await tools.dispatch(name, args, tenant_id)
+
+                # Track writes
+                if name in ("save_memory", "edit_memory"):
+                    write_attempts += 1
+                    if "error" not in result:
+                        write_count += 1
+                elif name == "recall":
+                    recall_count += 1
+
             except Exception as exc:
                 result = {"error": f"{type(exc).__name__}: {exc}"}
             messages.append({
@@ -175,3 +218,10 @@ async def _run_pass_inner(tenant_id, user_text, answer, client, model):
                 "tool_call_id": call.id,
                 "content": json.dumps(result, ensure_ascii=False, default=str),
             })
+
+    return {
+        "tool_names": sorted(tool_names),
+        "write_count": write_count,
+        "write_attempts": write_attempts,
+        "recall_count": recall_count,
+    }
