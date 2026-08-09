@@ -163,6 +163,10 @@ async def _run_pass(tenant_id, user_text, answer, client, model):
         user_text=user_text,
         answer=answer,
     )
+    # pass_stats().no_write is an aggregate — queue the specific turn too, so
+    # a silent extraction failure surfaces a case, not just a weekly count.
+    if not crashed and summary["write_count"] == 0:
+        supervision.capture_no_write_async(tenant_id, user_text, answer)
 
 
 async def _run_pass_inner(tenant_id, user_text, answer, client, model):

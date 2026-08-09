@@ -139,6 +139,39 @@ def capture_async(*args, **kwargs):
     task.add_done_callback(_tasks.discard)
 
 
+def capture_no_write(tenant, user_text, answer):
+    """Queue a specific case when the recollect pass wrote nothing on
+    substantial input (aicoach-dev#11 follow-up). pass_stats().no_write is
+    an aggregate — it says "something's off this week" but not which turn.
+    This puts the actual turn in front of the critic, same as the old
+    turn-based no_memory_write signal did before #10 moved writes out of
+    the turn. Below SUBSTANTIAL_CHARS an empty write is normal, not a signal."""
+    if len(user_text) <= SUBSTANTIAL_CHARS:
+        return
+    try:
+        blob = json.dumps({"user": user_text, "answer": answer}, ensure_ascii=False).encode()
+        f = _fernet()
+        if f:
+            blob = f.encrypt(blob)
+        now = time.time()
+        with _conn() as c:
+            c.execute(
+                "INSERT INTO cases (ts, day, tenant, skill, reasons, user_len, answer_len, tools, payload) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (now, int(now // 86400), tenant, None, "no_memory_write",
+                 len(user_text), len(answer), "", blob),
+            )
+    except Exception as exc:
+        print("[supervision] capture_no_write error:", exc, flush=True)
+
+
+def capture_no_write_async(*args, **kwargs):
+    """Capture off the event loop. Like capture_async."""
+    task = asyncio.create_task(asyncio.to_thread(capture_no_write, *args, **kwargs))
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+
+
 def log_pass(tenant, *, tool_names=(), write_count=0, write_attempts=0,
              recall_count=0, crashed=False, error=None, user_text=None, answer=None):
     """Log a memory extraction pass. Fire-and-forget: never raises.
