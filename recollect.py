@@ -96,6 +96,10 @@ _PASS_PROMPT = """\
 - **Для loop нужен status**: один из open (открыта), done (выполнена), dropped (брошена).
 - **supersedes**: если уточняешь старую запись, укажи slug'и устаревших записей \
   того же типа — они будут удалены.
+- **НЕ копируй `_source:`/`_updated:`/`_status:` из того, что вернул recall**: это \
+  служебные строки, их всегда проставляет система при записи. Если ты видишь их в \
+  найденной записи и включишь дословно в свой content — запись отклонится, а ты \
+  потратишь на это шаг бюджета.
 
 ## Дедупликация
 
@@ -166,7 +170,8 @@ async def _run_pass(tenant_id, user_text, answer, client, model):
     # pass_stats().no_write is an aggregate — queue the specific turn too, so
     # a silent extraction failure surfaces a case, not just a weekly count.
     if not crashed and summary["write_count"] == 0:
-        supervision.capture_no_write_async(tenant_id, user_text, answer)
+        supervision.capture_no_write_async(
+            tenant_id, user_text, answer, write_attempts=summary["write_attempts"])
 
 
 async def _run_pass_inner(tenant_id, user_text, answer, client, model):

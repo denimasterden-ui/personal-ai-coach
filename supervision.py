@@ -139,14 +139,19 @@ def capture_async(*args, **kwargs):
     task.add_done_callback(_tasks.discard)
 
 
-def capture_no_write(tenant, user_text, answer):
-    """Queue a specific case when the recollect pass wrote nothing on
-    substantial input (aicoach-dev#11 follow-up). pass_stats().no_write is
-    an aggregate — it says "something's off this week" but not which turn.
-    This puts the actual turn in front of the critic, same as the old
-    turn-based no_memory_write signal did before #10 moved writes out of
-    the turn. Below SUBSTANTIAL_CHARS an empty write is normal, not a signal."""
-    if len(user_text) <= SUBSTANTIAL_CHARS:
+def capture_no_write(tenant, user_text, answer, write_attempts=0):
+    """Queue a specific case when the recollect pass wrote nothing
+    (aicoach-dev#11 follow-up). pass_stats().no_write is an aggregate — it
+    says "something's off this week" but not which turn. This puts the
+    actual turn in front of the critic, same as the old turn-based
+    no_memory_write signal did before #10 moved writes out of the turn.
+
+    A tried-and-failed write (write_attempts > 0, e.g. every save_memory
+    call rejected by a gate) is always a signal, regardless of input length
+    — the pass attempted something and it didn't land. Below
+    SUBSTANTIAL_CHARS with zero attempts, an empty write is normal: the
+    turn simply had nothing worth remembering."""
+    if write_attempts == 0 and len(user_text) <= SUBSTANTIAL_CHARS:
         return
     try:
         blob = json.dumps({"user": user_text, "answer": answer}, ensure_ascii=False).encode()
