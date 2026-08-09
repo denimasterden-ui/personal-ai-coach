@@ -194,6 +194,7 @@ async def _run_inner(req: SessionRequest):
     # "критерий качественного разбора", so it needs to know which one that was.
     used_tools: list[str] = []
     skill_used = None
+    draft_parts: list[str] = []
 
     for _ in range(MAX_STEPS):
         response = await _client.chat.completions.create(
@@ -205,7 +206,8 @@ async def _run_inner(req: SessionRequest):
         )
         message = response.choices[0].message
 
-        if message.tool_calls and message.content and len(message.content.strip()) < 800:
+        if message.tool_calls and message.content:
+            draft_parts.append(message.content)
             yield _sse("thought", {"text": message.content})
 
         if not message.tool_calls:
@@ -241,29 +243,28 @@ async def _run_inner(req: SessionRequest):
                 "content": json.dumps(result, ensure_ascii=False, default=str),
             })
 
-    # Step budget spent while the model still wanted to call tools — a big/rich
-    # message (long voice transcript, multi-topic dump) can burn the budget on
-    # recall+save_memory before it gets to an actual reply. Rather than forcing
-    # a confident-sounding wrap-up (which reads as a rushed non-answer), tell
-    # the model to be honest about running out of room — and log it so we can
-    # see from real traffic (not a guess) whether MAX_STEPS needs raising.
+    # Step budget spent while the model still wanted tools. The разбор it drafted
+    # across those steps is already in the history; deliver it to the human too
+    # (bot.py reads only the `answer` event) and ask the model to finish what it
+    # started — not to report what it didn't manage.
     print(f"[budget] MAX_STEPS={MAX_STEPS} exhausted mid-tool-calls, tenant={req.tenant_id}", flush=True)
+    draft = "\n\n".join(p for p in draft_parts if p and p.strip())
     messages.append({"role": "user", "content":
-        "У тебя закончился лимит действий на этот ход, а разбор не завершён. Не изображай "
-        "законченный ответ — прямо скажи человеку, что сообщение было большое/насыщенное и ты "
-        "не успел разобрать всё за один раз. Кратко резюмируй, что успел заметить, и предложи "
-        "продолжить (например: чтобы дописать самому в следующем сообщении, или разбить на части)."})
+        "У тебя закончился лимит действий на этот ход. Выше ты уже начал разбор — продолжи и "
+        "заверши его: допиши связующую и финальную часть ответа человеку. Не повторяй уже "
+        "написанное и не перечисляй, что успел и не успел: человек ждёт сам разбор, а не отчёт о нём."})
     final = await _client.chat.completions.create(
         model=model_id,
         messages=_with_cache_control(messages),
         max_tokens=MAX_OUTPUT_TOKENS,
         extra_body=_EXTRA_BODY,
     )
-    text = final.choices[0].message.content or "(не удалось свести ответ)"
-    messages.append({"role": "assistant", "content": text})
-    supervision.capture_async(req.tenant_id, req.message, text, skill=skill_used,
+    tail = (final.choices[0].message.content or "").strip()
+    answer = "\n\n".join(p for p in (draft, tail) if p) or "(не удалось свести ответ)"
+    messages.append({"role": "assistant", "content": answer})
+    supervision.capture_async(req.tenant_id, req.message, answer, skill=skill_used,
                               tools_used=used_tools, budget_exhausted=True)
-    yield _sse("answer", {"text": text})
+    yield _sse("answer", {"text": answer})
 
 
 @app.post("/session")
