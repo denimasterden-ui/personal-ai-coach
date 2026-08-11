@@ -21,6 +21,7 @@ import json
 import os
 import signal
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -252,7 +253,7 @@ async def _send_text(client, chat_id, text, **kw):
         await _tg(client, "sendMessage", chat_id=chat_id, text=chunk, **kw)
 
 
-async def _ask_brain(client, tenant_id, session_id, text, model=None) -> str:
+async def _ask_brain(client, tenant_id, session_id, text, model=None, turn_id=None) -> str:
     """POST /session, consume the SSE stream, return the final answer text.
     Also logs a memory_write analytics event per save_memory tool call — a
     cheap proxy for "the coach actually learned something this turn"."""
@@ -260,6 +261,8 @@ async def _ask_brain(client, tenant_id, session_id, text, model=None) -> str:
     payload = {"tenant_id": tenant_id, "session_id": session_id, "message": text}
     if model:
         payload["model"] = model
+    if turn_id:
+        payload["turn_id"] = turn_id
     async with client.stream(
         "POST", f"{AICOACH_URL}/session", json=payload, timeout=300,
     ) as resp:
@@ -330,7 +333,8 @@ async def _worker(client, chat_id):
         text = "\n\n".join(st["parts"]); st["parts"] = []
         voice = st["voice"]; st["voice"] = False
         tenant = _tenant_id_for(chat_id)
-        print(f"[flush] chat={chat_id} chars={len(text)}", flush=True)
+        turn_id = uuid.uuid4().hex
+        print(f"[flush] chat={chat_id} chars={len(text)} turn_id={turn_id}", flush=True)
         analytics.log("message", tenant, kind="voice" if voice else "text")
         if len(text) > LONG_INPUT_CHARS:
             await _tg(client, "sendMessage", chat_id=chat_id,
@@ -338,7 +342,8 @@ async def _worker(client, chat_id):
         model = ADMIN_MODEL if _is_admin(chat_id) else None
         ka = asyncio.create_task(_typing_keepalive(client, chat_id))
         try:
-            answer = await _ask_brain(client, tenant, f"tg-{chat_id}", text, model=model)
+            answer = await _ask_brain(client, tenant, f"tg-{chat_id}", text, model=model,
+                                      turn_id=turn_id)
         except Exception as exc:
             # brain unreachable (e.g. mid-deploy restart) — don't leave the user in silence
             print("[flush] brain error:", exc, flush=True)

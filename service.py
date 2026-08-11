@@ -14,6 +14,7 @@ import json
 import os
 import pickle
 import time
+import uuid
 from pathlib import Path
 
 import tiktoken
@@ -49,6 +50,7 @@ class SessionRequest(BaseModel):
     message: str
     session_id: str | None = None
     model: str | None = None  # override CORE model (research-track R2 benchmark)
+    turn_id: str | None = None  # opaque turn identifier; bot generates one per flush
 
 
 class _Session:
@@ -172,6 +174,7 @@ async def _run(req: SessionRequest):
 
 async def _run_inner(req: SessionRequest):
     model_id = req.model or config.LLM_MODEL
+    turn_id = req.turn_id or uuid.uuid4().hex
     _evict_stale()
     session = _sessions.get(req.session_id) if req.session_id else None
 
@@ -213,8 +216,9 @@ async def _run_inner(req: SessionRequest):
             messages.append(message.model_dump(exclude_none=True))
             answer = message.content or ""
             supervision.capture_async(req.tenant_id, req.message, answer,
-                                      skill=skill_used, tools_used=used_tools)
-            yield _sse("answer", {"text": answer})
+                                      skill=skill_used, tools_used=used_tools,
+                                      turn_id=turn_id)
+            yield _sse("answer", {"text": answer, "turn_id": turn_id})
             # Memory extraction pass — fire-and-forget after answer is delivered.
             # The coach has no write tools during the turn; this pass decides what
             # to remember (aicoach-dev#10, ADR 0005).
@@ -267,8 +271,9 @@ async def _run_inner(req: SessionRequest):
     answer = "\n\n".join(p for p in (draft, tail) if p) or "(не удалось свести ответ)"
     messages.append({"role": "assistant", "content": answer})
     supervision.capture_async(req.tenant_id, req.message, answer, skill=skill_used,
-                              tools_used=used_tools, budget_exhausted=True)
-    yield _sse("answer", {"text": answer})
+                              tools_used=used_tools, budget_exhausted=True,
+                              turn_id=turn_id)
+    yield _sse("answer", {"text": answer, "turn_id": turn_id})
     # Memory extraction pass — fire-and-forget after answer is delivered.
     recollect.after_turn_async(req.tenant_id, req.message, answer,
                                client=_client, model=model_id)
