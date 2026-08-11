@@ -19,6 +19,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import signal
 import time
 import uuid
@@ -30,6 +31,7 @@ import httpx
 import analytics  # engagement analytics — hashed tenant, no message content
 import memory  # direct file-level access for /memory, /export, /delete_my_data
                # (same TENANTS_DIR + encryption as the service; no HTTP hop needed)
+import supervision
 
 TOKEN = os.environ["TG_BOT_TOKEN"]
 API = f"https://api.telegram.org/bot{TOKEN}"
@@ -269,12 +271,31 @@ async def _react(client, chat_id, message_id, emoji="👀"):
 
 TG_MAX = 4096  # Telegram's hard per-message limit; longer sends 400 and vanishes
 
+# ── rating buttons (aicoach-dev#18) ──────────────────────────────────────────
+# Accuracy axis, not sympathy: the person rates whether the разбор was on target,
+# which is the only prospective signal for the hypothesis that memory improves coaching.
+_RATING_LABELS = [("hit", "В точку"), ("partial", "Частично"), ("miss", "Мимо")]
+_VALID_TURN_ID = re.compile(r"^[0-9a-f]{32}$")
+_VALID_RATINGS = {"hit", "partial", "miss"}
+_RATING_ACK = {"hit": "✓ В точку", "partial": "✓ Частично", "miss": "✓ Мимо"}
+
+
+def _rating_keyboard(turn_id, selected=None):
+    """Inline keyboard with three rating buttons. selected marks the current choice."""
+    return {"inline_keyboard": [[
+        {"text": f"{'✓ ' if v == selected else ''}{label}",
+         "callback_data": f"rate:{turn_id}:{v}"}
+        for v, label in _RATING_LABELS
+    ]]}
+
 
 async def _send_text(client, chat_id, text, **kw):
     """Split text over 4096 chars on line boundaries and send as several messages —
-    a rich /memory profile or a long coach answer would otherwise silently 400."""
+    a rich /memory profile or a long coach answer would otherwise silently 400.
+    reply_markup, if given, is attached only to the last chunk."""
     if not text:
         return
+    reply_markup = kw.pop("reply_markup", None)
     while text:
         if len(text) <= TG_MAX:
             chunk, text = text, ""
@@ -283,7 +304,10 @@ async def _send_text(client, chat_id, text, **kw):
             if cut < TG_MAX // 2:
                 cut = TG_MAX
             chunk, text = text[:cut], text[cut:].lstrip("\n")
-        await _tg(client, "sendMessage", chat_id=chat_id, text=chunk, **kw)
+        extra = dict(kw)
+        if not text and reply_markup is not None:  # last chunk only
+            extra["reply_markup"] = reply_markup
+        await _tg(client, "sendMessage", chat_id=chat_id, text=chunk, **extra)
 
 
 async def _ask_brain(client, tenant_id, session_id, text, model=None, turn_id=None, light_intro=False) -> str:
@@ -433,7 +457,8 @@ async def _worker(client, chat_id):
             continue
         finally:
             ka.cancel()
-        await _send_text(client, chat_id, answer)
+        await _send_text(client, chat_id, answer,
+                         reply_markup=_rating_keyboard(turn_id))
         analytics.log("answer", tenant)
         print(f"[answer] sent {len(answer)} chars", flush=True)
 
@@ -761,6 +786,43 @@ async def _handle_inner(client, msg):
                   text="Я понимаю текст, голосовые и PDF. Это пока не возьму.")
 
 
+async def _handle_callback(client, cq):
+    """Handle an inline button press (callback_query).
+    Validates payload strictly — it's an external input. Saves the rating, updates
+    the button display, acknowledges. Never produces a new chat message."""
+    cq_id = cq["id"]
+    data = cq.get("data", "")
+    msg = cq.get("message")
+    if not msg:
+        await _tg(client, "answerCallbackQuery", callback_query_id=cq_id)
+        return
+    chat_id = msg["chat"]["id"]
+    message_id = msg["message_id"]
+
+    parts = data.split(":")
+    if (len(parts) != 3 or parts[0] != "rate"
+            or not _VALID_TURN_ID.match(parts[1])
+            or parts[2] not in _VALID_RATINGS):
+        print(f"[rating] invalid callback_data: {data!r}", flush=True)
+        await _tg(client, "answerCallbackQuery", callback_query_id=cq_id)
+        return
+
+    _, turn_id, value = parts
+    tenant = _tenant_id_for(chat_id)
+    supervision.save_rating(tenant, turn_id, value)
+    print(f"[rating] chat={chat_id} turn={turn_id[:8]}… value={value}", flush=True)
+
+    try:
+        await _tg(client, "editMessageReplyMarkup",
+                  chat_id=chat_id, message_id=message_id,
+                  reply_markup=_rating_keyboard(turn_id, selected=value))
+    except Exception as exc:
+        print(f"[rating] editMessageReplyMarkup failed: {exc}", flush=True)
+
+    await _tg(client, "answerCallbackQuery",
+              callback_query_id=cq_id, text=_RATING_ACK[value])
+
+
 async def main():
     offset = None
     mode = f"PUBLIC (hashed tenants, {DAILY_MESSAGE_LIMIT}/day cap)" if PUBLIC_MODE else (
@@ -799,11 +861,17 @@ async def main():
             for u in upd.get("result", []):
                 offset = u["update_id"] + 1
                 msg = u.get("message")
+                cq = u.get("callback_query")
                 if msg:
                     try:
                         await _handle(client, msg)
                     except Exception as exc:
                         print("handle error:", exc)
+                elif cq:
+                    try:
+                        await _handle_callback(client, cq)
+                    except Exception as exc:
+                        print("callback error:", exc)
 
         print(f"[shutdown] draining {len(_inflight)} in-flight turn(s)…", flush=True)
         if _inflight:

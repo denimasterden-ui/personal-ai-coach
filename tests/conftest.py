@@ -33,3 +33,13 @@ def _clear_bot_contacts():
     bot._contacts.clear()
     yield
     bot._contacts.clear()
+
+
+@pytest.fixture(autouse=True)
+def _clear_bot_chat():
+    """bot._chat holds per-chat serial worker state. A test that leaves a
+    running worker or buffered parts can corrupt the next test's turn sequence."""
+    import bot
+    bot._chat.clear()
+    yield
+    bot._chat.clear()
