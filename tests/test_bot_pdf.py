@@ -214,7 +214,7 @@ async def test_a_refused_attachment_releases_the_turn(tg, monkeypatch):
 
 
 def _capture_turn(sink):
-    async def _f(client, tenant, session, text, model=None, turn_id=None):
+    async def _f(client, tenant, session, text, model=None, turn_id=None, light_intro=False):
         sink.append(text)
         return "ответ"
     return _f

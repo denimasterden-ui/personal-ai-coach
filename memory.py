@@ -288,6 +288,22 @@ async def recall(tenant_id, query, limit=5):
         return []
 
 
+def _has_derived_records_sync(tenant_id):
+    """Whether the coach has already extracted something from this person's
+    conversation. Uploaded source documents deliberately do not count: the bot
+    stores them before the first analysis."""
+    d = _tenant_dir(tenant_id)
+    return any(p.parent.name != "docs" for p in _iter_md(d))
+
+
+async def has_derived_records(tenant_id):
+    try:
+        return await asyncio.to_thread(_has_derived_records_sync, tenant_id)
+    except Exception as exc:
+        log.warning("has_derived_records(%r) failed: %s", tenant_id, exc)
+        return False
+
+
 def _load_doc_sync(tenant_id, slug):
     """Fetch a source document whole by its slug. recall only shows a preview;
     the model gets the rest on demand via load_doc."""

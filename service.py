@@ -51,6 +51,7 @@ class SessionRequest(BaseModel):
     session_id: str | None = None
     model: str | None = None  # override CORE model (research-track R2 benchmark)
     turn_id: str | None = None  # opaque turn identifier; bot generates one per flush
+    light_intro: bool = False
 
 
 class PortraitRequest(BaseModel):
@@ -58,11 +59,12 @@ class PortraitRequest(BaseModel):
 
 
 class _Session:
-    __slots__ = ("messages", "last_used")
+    __slots__ = ("messages", "last_used", "light_intro")
 
-    def __init__(self, messages):
+    def __init__(self, messages, light_intro=False):
         self.messages = messages
         self.last_used = time.time()
+        self.light_intro = light_intro
 
 
 _sessions: dict[str, _Session] = {}
@@ -145,13 +147,22 @@ def _with_cache_control(msgs):
     return out
 
 
-async def _build_system_prompt():
+async def _build_system_prompt(light_intro=False):
     playbook = await memory.load_skill(PLAYBOOK_TITLE) or ""
     catalog = await memory.load_skills_catalog()
     extra = [s for s in catalog if s["title"].strip().lower() != PLAYBOOK_TITLE.lower()]
     catalog_doc = (
         "\n".join(f"- **{s['title']}**: {s['description']}" for s in extra)
         if extra else "_Других скиллов пока нет._"
+    )
+    intro = (
+        "\n\n# Лёгкое знакомство\n"
+        "Это короткое первое сообщение человека. Ответь тепло и кратко одним простым "
+        "вопросом с низким порогом ответа, например: «Привет! Как тебя лучше называть?» "
+        "Не выдавай длинное приветствие и не проси сразу подробно рассказывать о жизни. "
+        "Если в сообщении есть острое состояние, риск или кризис, этот сценарий не применяй: "
+        "сначала действуй по кризисным правилам плейбука."
+        if light_intro else ""
     )
     return (
         playbook
@@ -161,6 +172,7 @@ async def _build_system_prompt():
         "твоего ответа — не записывай ничего во время хода.\n\n"
         "# Дополнительные скиллы (вызови load_skill(title) за полным текстом)\n\n"
         + catalog_doc
+        + intro
     )
 
 
@@ -183,14 +195,21 @@ async def _run_inner(req: SessionRequest):
     session = _sessions.get(req.session_id) if req.session_id else None
 
     if session is None:
-        system_prompt = await _build_system_prompt()
+        system_prompt = await _build_system_prompt(light_intro=req.light_intro)
         session = _Session([
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": req.message},
-        ])
+        ], light_intro=req.light_intro)
         if req.session_id:
             _sessions[req.session_id] = session
     else:
+        # The low-threshold question belongs to the opening reply alone. Keep
+        # the rest of that live conversation on the normal coaching prompt.
+        if getattr(session, "light_intro", False):
+            session.messages[0] = {
+                "role": "system", "content": await _build_system_prompt()
+            }
+            session.light_intro = False
         session.messages.append({"role": "user", "content": req.message})
     session.last_used = time.time()
     messages = session.messages
