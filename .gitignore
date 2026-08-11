@@ -4,6 +4,7 @@ __pycache__/
 tenants/
 subscribers.enc
 subscribers.json
+contacts.enc
 backups
 backups/
 *.pyc

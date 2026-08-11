@@ -125,6 +125,39 @@ def _save_subs() -> None:
         print("[weekly] save error:", exc, flush=True)
 
 
+# ── product store (ADR 0004): chat_id + tour state ────────────────────────────
+# The raw chat_id of everyone who pressed /start. The tenant hash is one-way, so
+# without this store the operator can never reach a person again once the in-RAM
+# session TTLs — eleven users were already lost this way. Encrypted with the same
+# key as subscriptions; a leaked file must not read as a plaintext Telegram roster.
+# The value reserves room for tour state (onboarding progress), not built out yet.
+PRODUCT_STORE_FILE = Path(os.environ.get("PRODUCT_STORE_FILE", "contacts.enc"))
+
+_contacts: dict[str, dict] = {}  # str(chat_id) -> {"tour": ...}  (tour state TBD)
+
+
+def _load_contacts() -> None:
+    if not PRODUCT_STORE_FILE.exists():
+        return
+    try:
+        data = PRODUCT_STORE_FILE.read_bytes()
+        if _sub_fernet:
+            data = _sub_fernet.decrypt(data)
+        _contacts.update(json.loads(data.decode("utf-8")))
+    except Exception as exc:
+        print("[contacts] load error:", exc, flush=True)
+
+
+def _save_contacts() -> None:
+    try:
+        data = json.dumps(_contacts).encode("utf-8")
+        if _sub_fernet:
+            data = _sub_fernet.encrypt(data)
+        PRODUCT_STORE_FILE.write_bytes(data)
+    except Exception as exc:
+        print("[contacts] save error:", exc, flush=True)
+
+
 WEEKLY_NUDGE = (
     "Прошла неделя. Как ты?\n\n"
     "Что изменилось с прошлого раза — в мыслях, в решениях, в том, что беспокоило? "
@@ -424,6 +457,13 @@ async def _command(client, chat_id, text):
     analytics.log("command", tenant, cmd=cmd)
 
     if cmd == "/start":
+        # First contact: persist the raw chat_id so the person is reachable even
+        # after the in-RAM session is gone (the tenant hash is one-way). The
+        # value is a dict with room for tour state — not built out yet.
+        cid = str(chat_id)
+        if cid not in _contacts:
+            _contacts[cid] = {}
+            _save_contacts()
         await _tg(client, "sendMessage", chat_id=chat_id, text=_onboarding(chat_id))
     elif cmd == "/memory":
         summary = await memory.summarize(tenant)
@@ -451,6 +491,8 @@ async def _command(client, chat_id, text):
             print("[delete] session reset failed:", exc, flush=True)
         if _subs.pop(str(chat_id), None) is not None:
             _save_subs()
+        if _contacts.pop(str(chat_id), None) is not None:
+            _save_contacts()
         analytics.log("deleted", tenant)
         await _tg(client, "sendMessage", chat_id=chat_id,
                   text="Готово — вся твоя память удалена." if ok else "Данных и так не было.")
@@ -659,8 +701,9 @@ async def main():
     mode = f"PUBLIC (hashed tenants, {DAILY_MESSAGE_LIMIT}/day cap)" if PUBLIC_MODE else (
         "private, whitelist=set" if ALLOWED_CHAT_ID else "private, whitelist=OPEN (reveals chat_id)")
     _load_subs()
+    _load_contacts()
     analytics.init()
-    print(f"AICOACH bot up. mode={mode}, weekly_subs={len(_subs)}")
+    print(f"AICOACH bot up. mode={mode}, weekly_subs={len(_subs)}, contacts={len(_contacts)}")
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
