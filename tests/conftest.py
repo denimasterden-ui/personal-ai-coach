@@ -31,8 +31,10 @@ def _clear_bot_contacts():
     bot tests, so a leftover chat_id entry would leak between test files."""
     import bot
     bot._contacts.clear()
+    bot._feedback_pending.clear()
     yield
     bot._contacts.clear()
+    bot._feedback_pending.clear()
 
 
 @pytest.fixture(autouse=True)

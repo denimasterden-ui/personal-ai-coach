@@ -160,6 +160,29 @@ def _save_contacts() -> None:
         print("[contacts] save error:", exc, flush=True)
 
 
+# ── product feedback (aicoach-dev#20) ────────────────────────────────────────
+# After FEEDBACK_AFTER_TURN completed turns the bot — not the coach — asks once,
+# as a separate message, whether the product was useful. The answer is about the
+# product, not about the person, so it must never enter the brain as a turn or
+# reach the extraction pass (ADR 0004 rule 1). Asked exactly once: the
+# feedback_asked marker persists in the product store; on restart the person who
+# hasn't answered yet just continues talking normally.
+FEEDBACK_AFTER_TURN = 3
+
+FEEDBACK_QUESTION = (
+    "Как тебе вообще — полезно ли?\n\n"
+    "Расскажи своими словами, что зашло, а что нет. "
+    "Можно голосовым — я расшифрую."
+)
+
+FEEDBACK_THANKS = "Спасибо за обратную связь."
+
+# chat_ids whose next text/voice message is the feedback answer (not a turn).
+# Ephemeral: a restart clears it — the question was already asked (feedback_asked
+# persists), so it won't be repeated, and conversation continues without it.
+_feedback_pending: set[int] = set()
+
+
 WEEKLY_NUDGE = (
     "Прошла неделя. Как ты?\n\n"
     "Что изменилось с прошлого раза — в мыслях, в решениях, в том, что беспокоило? "
@@ -347,6 +370,37 @@ async def _ask_portrait(client, tenant_id) -> dict:
     return response.json()
 
 
+async def _maybe_ask_feedback(client, chat_id):
+    """Count completed turns; after the 3rd, ask for product feedback exactly
+    once. The turn counter and the feedback_asked marker live in the product
+    store (ADR 0004) — the brain never sees either."""
+    cid = str(chat_id)
+    entry = _contacts.setdefault(cid, {})
+    count = entry.get("turn_count", 0) + 1
+    entry["turn_count"] = count
+    ask = count == FEEDBACK_AFTER_TURN and not entry.get("feedback_asked")
+    if ask:
+        entry["feedback_asked"] = True
+        _feedback_pending.add(chat_id)
+    _save_contacts()
+    if ask:
+        await _tg(client, "sendMessage", chat_id=chat_id, text=FEEDBACK_QUESTION)
+        analytics.log("feedback_asked", _tenant_id_for(chat_id))
+        print(f"[feedback] asked chat={chat_id}", flush=True)
+
+
+async def _capture_feedback(client, chat_id, text):
+    """Store the feedback answer and thank the person. The answer does NOT go to
+    the brain and does NOT enter the extraction pass — it's a fact about the
+    product (ADR 0004), kept in the product store, purged by /delete_my_data."""
+    cid = str(chat_id)
+    _contacts.setdefault(cid, {})["feedback"] = text
+    _save_contacts()
+    analytics.log("feedback", _tenant_id_for(chat_id))
+    await _tg(client, "sendMessage", chat_id=chat_id, text=FEEDBACK_THANKS)
+    print(f"[feedback] captured {len(text)} chars from chat={chat_id}", flush=True)
+
+
 # Per-chat serial worker (the "followup" queue pattern). A person often sends a
 # thought as several messages in a row — and may keep talking while the brain is
 # still answering the previous batch. One worker task per chat guarantees exactly
@@ -461,6 +515,7 @@ async def _worker(client, chat_id):
                          reply_markup=_rating_keyboard(turn_id))
         analytics.log("answer", tenant)
         print(f"[answer] sent {len(answer)} chars", flush=True)
+        await _maybe_ask_feedback(client, chat_id)
 
 
 def _state(chat_id):
@@ -582,6 +637,7 @@ async def _command(client, chat_id, text):
             _save_subs()
         if _contacts.pop(str(chat_id), None) is not None:
             _save_contacts()
+        _feedback_pending.discard(chat_id)
         analytics.log("deleted", tenant)
         await _tg(client, "sendMessage", chat_id=chat_id,
                   text="Готово — вся твоя память удалена." if ok else "Данных и так не было.")
@@ -681,6 +737,10 @@ async def _handle_inner(client, msg):
             return
         # echo recognition immediately (feedback), buffer for the joined turn
         await _tg(client, "sendMessage", chat_id=chat_id, text=f"🎙 _{text}_", parse_mode="Markdown")
+        if chat_id in _feedback_pending:
+            _feedback_pending.discard(chat_id)
+            await _capture_feedback(client, chat_id, text)
+            return
         if not analytics.has_seen(_tenant_id_for(chat_id)):
             analytics.log("first_seen", _tenant_id_for(chat_id), source="")
         _buffer(client, chat_id, text, kind="voice")
@@ -688,6 +748,10 @@ async def _handle_inner(client, msg):
         text = msg["text"]
         if text.startswith("/"):
             await _command(client, chat_id, text)
+            return
+        if chat_id in _feedback_pending:
+            _feedback_pending.discard(chat_id)
+            await _capture_feedback(client, chat_id, text)
             return
         await _react(client, chat_id, msg["message_id"])  # 👀 «прочитал»
         if not analytics.has_seen(_tenant_id_for(chat_id)):
