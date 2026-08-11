@@ -23,7 +23,7 @@ def stub_io(monkeypatch):
     """Stub all outbound I/O; record turn order and peak concurrency of _ask_brain."""
     state = {"concurrent": 0, "peak": 0, "turns": []}
 
-    async def fake_ask(client, tenant, session_id, text, model=None):
+    async def fake_ask(client, tenant, session_id, text, model=None, turn_id=None):
         state["concurrent"] += 1
         state["peak"] = max(state["peak"], state["concurrent"])
         state["turns"].append(text)
