@@ -21,3 +21,15 @@ def _clear_service_sessions():
     service._sessions.clear()
     yield
     service._sessions.clear()
+
+
+@pytest.fixture(autouse=True)
+def _clear_bot_contacts():
+    """bot._contacts is a module-level dict too — the first-contact marker
+    (aicoach-dev#17, moved out of tenant memory into the product store to
+    honour ADR 0004) is written by the real, unmocked code path in several
+    bot tests, so a leftover chat_id entry would leak between test files."""
+    import bot
+    bot._contacts.clear()
+    yield
+    bot._contacts.clear()

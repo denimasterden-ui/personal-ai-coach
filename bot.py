@@ -355,26 +355,26 @@ def _is_brief_first_message(text: str) -> bool:
     return not words or all(word in _GREETING_WORDS for word in words)
 
 
-async def _needs_light_intro(tenant_id: str, text: str, attachment: bool) -> bool:
-    _, light_intro = await _first_contact_route(tenant_id, text, attachment)
+async def _needs_light_intro(chat_id, text: str, attachment: bool) -> bool:
+    _, light_intro = await _first_contact_route(chat_id, text, attachment)
     return light_intro
 
 
-async def _first_contact_route(tenant_id: str, text: str, attachment: bool) -> tuple[bool, bool]:
-    first_contact = not await memory.has_derived_records(tenant_id)
+async def _first_contact_route(chat_id, text: str, attachment: bool) -> tuple[bool, bool]:
+    seen = _contacts.get(str(chat_id), {}).get("first_contact_seen", False)
+    first_contact = not seen and not await memory.has_derived_records(_tenant_id_for(chat_id))
     return first_contact, first_contact and not attachment and _is_brief_first_message(text)
 
 
-async def _remember_first_contact(tenant_id: str) -> None:
-    """Make first contact durable even when recollection finds no personal fact.
-    It is a derived session record, not a source document, so a week-old return
-    cannot be mistaken for a fresh start after the six-hour session TTL."""
-    result = await memory.save_memory(
-        tenant_id, "session", "Первый контакт через Telegram.", slug="first-contact",
-        source="системная отметка первого контакта",
-    )
-    if isinstance(result, dict) and result.get("error"):
-        print(f"[first-contact] mark failed: {result}", flush=True)
+async def _remember_first_contact(chat_id) -> None:
+    """Make first contact durable even when recollection finds no personal fact
+    (e.g. a bare "привет" that recollect extracts nothing from) — otherwise a
+    week-old return with still-empty memory would be routed into the intro
+    again. This is product routing state (ADR 0004), so it lives in the
+    product store keyed by chat_id, not in the person's memory."""
+    cid = str(chat_id)
+    _contacts.setdefault(cid, {})["first_contact_seen"] = True
+    _save_contacts()
 
 
 async def _typing_keepalive(client, chat_id):
