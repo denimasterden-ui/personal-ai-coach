@@ -314,6 +314,14 @@ async def _ask_brain(client, tenant_id, session_id, text, model=None, turn_id=No
     return answer or "(пустой ответ)"
 
 
+async def _ask_portrait(client, tenant_id) -> dict:
+    """Ask the separate portrait endpoint; it never becomes a session turn."""
+    response = await client.post(
+        f"{AICOACH_URL}/portrait", json={"tenant_id": tenant_id}, timeout=300,
+    )
+    return response.json()
+
+
 # Per-chat serial worker (the "followup" queue pattern). A person often sends a
 # thought as several messages in a row — and may keep talking while the brain is
 # still answering the previous batch. One worker task per chat guarantees exactly
@@ -420,6 +428,7 @@ def _onboarding(chat_id: int) -> str:
         "мы остановились.\n\n"
         "Команды:\n"
         "• /memory — что я о тебе понял\n"
+        "• /portrait — связный портрет по накопленной памяти\n"
         "• /export — забрать свою память файлом .md\n"
         "• /weekly — напоминание раз в неделю вернуться к рефлексии\n"
         "• /delete_my_data — стереть всё о тебе"
@@ -469,6 +478,21 @@ async def _command(client, chat_id, text):
         summary = await memory.summarize(tenant)
         await _send_text(client, chat_id,
                          summary or "Пока пусто — расскажи о себе, и я начну запоминать.")
+    elif cmd == "/portrait":
+        try:
+            result = await _ask_portrait(client, tenant)
+        except Exception as exc:
+            print("[portrait] brain error:", exc, flush=True)
+            await _tg(client, "sendMessage", chat_id=chat_id,
+                      text="Не удалось собрать портрет прямо сейчас. Попробуй чуть позже.")
+            return
+        if not result.get("ready"):
+            await _tg(client, "sendMessage", chat_id=chat_id,
+                      text=result.get("reason") or "Для портрета пока ещё рано.")
+        else:
+            portrait = result.get("text") or ""
+            await _send_text(client, chat_id, portrait)
+            await _send_document(client, chat_id, "aicoach-portrait.md", portrait)
     elif cmd == "/export":
         dump = await memory.export_tenant(tenant)
         if not dump:
@@ -527,6 +551,7 @@ async def _command(client, chat_id, text):
 _COMMANDS = [
     {"command": "start", "description": "О боте и список команд"},
     {"command": "memory", "description": "Что я о тебе понял"},
+    {"command": "portrait", "description": "Собрать связный портрет"},
     {"command": "export", "description": "Забрать свою память файлом .md"},
     {"command": "weekly", "description": "Еженедельное напоминание вернуться к рефлексии"},
     {"command": "delete_my_data", "description": "Стереть всё о тебе"},

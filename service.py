@@ -53,6 +53,10 @@ class SessionRequest(BaseModel):
     turn_id: str | None = None  # opaque turn identifier; bot generates one per flush
 
 
+class PortraitRequest(BaseModel):
+    tenant_id: str
+
+
 class _Session:
     __slots__ = ("messages", "last_used")
 
@@ -277,6 +281,62 @@ async def _run_inner(req: SessionRequest):
     # Memory extraction pass — fire-and-forget after answer is delivered.
     recollect.after_turn_async(req.tenant_id, req.message, answer,
                                client=_client, model=model_id)
+
+
+def _portrait_entry_counts(tenant_id: str) -> tuple[int, int]:
+    """Count the persisted per-entry evidence; single files are not entries.
+
+    doc and session are excluded: CONTEXT.md defines "выведенная запись" as
+    what the coach derived itself, explicitly opposed to brought material
+    (doc = uploaded file) and session transcripts. Counting them toward the
+    portrait threshold would let an upload alone satisfy "≥5 derived", with
+    nothing actually derived.
+    """
+    tenant_dir = memory._tenant_dir(tenant_id)
+    counts = {
+        kind: sum(1 for _ in (tenant_dir / memory._SUBDIR[kind]).glob("*.md"))
+        if (tenant_dir / memory._SUBDIR[kind]).is_dir() else 0
+        for kind in memory._PER_ENTRY
+    }
+    derived = memory._PER_ENTRY - {"doc", "session"}
+    return sum(counts[k] for k in derived), counts["pattern"]
+
+
+@app.post("/portrait")
+async def portrait(req: PortraitRequest):
+    entries, patterns = _portrait_entry_counts(req.tenant_id)
+    if entries < 5 or patterns < 3:
+        return {
+            "ready": False,
+            "reason": (
+                "Для портрета ещё рано: нужно не меньше 5 выведенных записей, "
+                f"из них 3 паттерна. Сейчас: {entries} записей, {patterns} паттерна."
+            ),
+        }
+
+    dump = await memory.export_tenant(req.tenant_id)
+    response = await _client.chat.completions.create(
+        model=config.LLM_MODEL,
+        messages=[
+            {"role": "system", "content": (
+                "Собери психологический портрет человека по его памяти. Дай связный, "
+                "бережный текст: сведи повторяющиеся наблюдения в центральный вектор, "
+                "покажи связи и возможные противоречия. Не перечисляй записи и не "
+                "выдавай догадки за факты. Это разовый ответ, не добавляй в него "
+                "служебных пояснений."
+            )},
+            {"role": "user", "content": "Полный дамп памяти:\n\n" + dump},
+        ],
+        max_tokens=MAX_OUTPUT_TOKENS,
+        extra_body=_EXTRA_BODY,
+    )
+    text = (response.choices[0].message.content or "").strip()
+    if not text:
+        return {
+            "ready": False,
+            "reason": "Не удалось собрать портрет прямо сейчас. Попробуй чуть позже.",
+        }
+    return {"ready": True, "text": text}
 
 
 @app.post("/session")
