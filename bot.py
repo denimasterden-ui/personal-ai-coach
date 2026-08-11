@@ -312,6 +312,32 @@ def _rating_keyboard(turn_id, selected=None):
     ]]}
 
 
+# ── onboarding tour (aicoach-dev#19) ─────────────────────────────────────────
+# Short step-by-step tour offered as a button on /start — not as text replacing
+# a разбор. State lives in the product store (ADR 0004 rule 2): it's a product
+# routing fact, not a personal fact, so the brain never sees it.
+_TOUR_STEPS = [
+    "🧠 Память между разговорами\n\nПосле каждого разговора я извлекаю паттерны и наблюдения — и помню их, когда ты возвращаешься.\n\n/memory — посмотреть, что накоплено.",
+    "🔍 Разбор в контексте\n\nКаждое сообщение я разбираю с опорой на то, что уже знаю о тебе — не новый чат каждый раз, а коуч, который помнит историю.",
+    "🔒 Данные под контролем\n\n/export — забрать всю память файлом. /delete_my_data — стереть всё безвозвратно.\n\nТеперь просто расскажи, что сейчас занимает — начнём.",
+]
+
+
+def _tour_offer_keyboard():
+    return {"inline_keyboard": [[
+        {"text": "Как это устроено?", "callback_data": "tour:0"},
+    ]]}
+
+
+def _tour_nav_keyboard(step: int):
+    last = step == len(_TOUR_STEPS) - 1
+    row = []
+    if not last:
+        row.append({"text": "Дальше →", "callback_data": f"tour:{step + 1}"})
+    row.append({"text": "Понятно" if last else "Хватит", "callback_data": "tour:exit"})
+    return {"inline_keyboard": [row]}
+
+
 async def _send_text(client, chat_id, text, **kw):
     """Split text over 4096 chars on line boundaries and send as several messages —
     a rich /memory profile or a long coach answer would otherwise silently 400.
@@ -587,13 +613,14 @@ async def _command(client, chat_id, text):
 
     if cmd == "/start":
         # First contact: persist the raw chat_id so the person is reachable even
-        # after the in-RAM session is gone (the tenant hash is one-way). The
-        # value is a dict with room for tour state — not built out yet.
+        # after the in-RAM session is gone (the tenant hash is one-way).
         cid = str(chat_id)
         if cid not in _contacts:
             _contacts[cid] = {}
             _save_contacts()
-        await _tg(client, "sendMessage", chat_id=chat_id, text=_onboarding(chat_id))
+        tour_done = _contacts[cid].get("tour") == "done"
+        kw = {} if tour_done else {"reply_markup": _tour_offer_keyboard()}
+        await _tg(client, "sendMessage", chat_id=chat_id, text=_onboarding(chat_id), **kw)
     elif cmd == "/memory":
         summary = await memory.summarize(tenant)
         await _send_text(client, chat_id,
@@ -850,6 +877,37 @@ async def _handle_inner(client, msg):
                   text="Я понимаю текст, голосовые и PDF. Это пока не возьму.")
 
 
+async def _handle_tour_callback(client, cq_id, chat_id, action):
+    """Handle a tour button press: advance to the next step or exit the tour."""
+    cid = str(chat_id)
+    if action == "exit":
+        _contacts.setdefault(cid, {})["tour"] = "done"
+        _save_contacts()
+        print(f"[tour] chat={chat_id} done", flush=True)
+        await _tg(client, "answerCallbackQuery", callback_query_id=cq_id,
+                  text="Возвращаемся к разговору")
+        return
+
+    if not action.isdigit():
+        await _tg(client, "answerCallbackQuery", callback_query_id=cq_id)
+        return
+
+    step = int(action)
+    if step >= len(_TOUR_STEPS):
+        await _tg(client, "answerCallbackQuery", callback_query_id=cq_id)
+        return
+
+    # Stale button: tour already done, silently acknowledge
+    if _contacts.get(cid, {}).get("tour") == "done":
+        await _tg(client, "answerCallbackQuery", callback_query_id=cq_id)
+        return
+
+    print(f"[tour] chat={chat_id} step={step}", flush=True)
+    await _tg(client, "sendMessage", chat_id=chat_id,
+              text=_TOUR_STEPS[step], reply_markup=_tour_nav_keyboard(step))
+    await _tg(client, "answerCallbackQuery", callback_query_id=cq_id)
+
+
 async def _handle_callback(client, cq):
     """Handle an inline button press (callback_query).
     Validates payload strictly — it's an external input. Saves the rating, updates
@@ -864,6 +922,10 @@ async def _handle_callback(client, cq):
     message_id = msg["message_id"]
 
     parts = data.split(":")
+    if parts[0] == "tour" and len(parts) == 2:
+        await _handle_tour_callback(client, cq_id, chat_id, parts[1])
+        return
+
     if (len(parts) != 3 or parts[0] != "rate"
             or not _VALID_TURN_ID.match(parts[1])
             or parts[2] not in _VALID_RATINGS):
