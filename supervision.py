@@ -72,6 +72,15 @@ CREATE TABLE IF NOT EXISTS passes (
 );
 CREATE INDEX IF NOT EXISTS idx_passes_tenant ON passes(tenant);
 CREATE INDEX IF NOT EXISTS idx_passes_day    ON passes(day);
+
+CREATE TABLE IF NOT EXISTS ratings (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts       REAL NOT NULL,
+    tenant   TEXT NOT NULL,
+    turn_id  TEXT NOT NULL UNIQUE,   -- one rating per turn; re-press replaces
+    rating   TEXT NOT NULL           -- scale value: hit / partial / miss
+);
+CREATE INDEX IF NOT EXISTS idx_ratings_turn_id ON ratings(turn_id);
 """
 
 
@@ -262,16 +271,19 @@ def _decode(blob):
 
 def pending(limit=50, tenant=None):
     """Un-reviewed cases, oldest first, with content decrypted. Optionally scoped
-    to one tenant (supervise a single person's разборы rather than the whole pool)."""
-    where = "reviewed = 0" + (" AND tenant = ?" if tenant else "")
+    to one tenant. Includes user rating (if any) via LEFT JOIN so the critic can
+    see whether the person already rated the разбор."""
+    where = "c.reviewed = 0" + (" AND c.tenant = ?" if tenant else "")
     params = ([tenant, limit] if tenant else [limit])
     with _conn() as c:
         rows = c.execute(
-            f"SELECT id, ts, tenant, skill, reasons, tools, payload, turn_id FROM cases "
-            f"WHERE {where} ORDER BY ts LIMIT ?", params
+            f"SELECT c.id, c.ts, c.tenant, c.skill, c.reasons, c.tools, c.payload, "
+            f"c.turn_id, r.rating "
+            f"FROM cases c LEFT JOIN ratings r ON c.turn_id = r.turn_id "
+            f"WHERE {where} ORDER BY c.ts LIMIT ?", params
         ).fetchall()
     out = []
-    for cid, ts, tenant, skill, reasons, tools_used, payload, turn_id in rows:
+    for cid, ts, tenant, skill, reasons, tools_used, payload, turn_id, rating in rows:
         try:
             body = _decode(payload)
         except Exception as exc:
@@ -280,7 +292,7 @@ def pending(limit=50, tenant=None):
         out.append({"id": cid, "ts": ts, "tenant": tenant, "skill": skill,
                     "reasons": reasons, "tools": tools_used,
                     "user": body["user"], "answer": body["answer"],
-                    "turn_id": turn_id})
+                    "turn_id": turn_id, "rating": rating})
     return out
 
 
@@ -336,3 +348,30 @@ def pass_stats(days=7):
             (cutoff,)
         ).fetchall()
     return {"total": total, "crashed": crashed, "no_write": no_write, "by_tenant": by_tenant}
+
+
+def save_rating(tenant, turn_id, rating):
+    """Upsert a user rating for a turn. Re-press replaces, never duplicates. Never raises."""
+    try:
+        now = time.time()
+        with _conn() as c:
+            c.execute(
+                "INSERT INTO ratings (ts, tenant, turn_id, rating) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(turn_id) DO UPDATE SET ts=excluded.ts, rating=excluded.rating",
+                (now, tenant, turn_id, rating),
+            )
+    except Exception as exc:
+        print("[supervision] save_rating error:", exc, flush=True)
+
+
+def get_rating(turn_id):
+    """Return the rating for a turn ('hit'/'partial'/'miss'), or None if not yet rated."""
+    try:
+        with _conn() as c:
+            row = c.execute(
+                "SELECT rating FROM ratings WHERE turn_id = ?", (turn_id,)
+            ).fetchone()
+        return row[0] if row else None
+    except Exception as exc:
+        print("[supervision] get_rating error:", exc, flush=True)
+        return None
