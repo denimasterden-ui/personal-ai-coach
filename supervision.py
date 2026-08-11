@@ -1,6 +1,8 @@
 """Supervision capture — material for the offline critic (see dev ADR 0003).
 
-Two capture modes: flagged tenants (SUPERVISED_TENANTS) get every turn stored;
+Three capture modes: flagged tenants (SUPERVISED_TENANTS) get every turn stored;
+brand-new tenants get their first ONBOARDING_TURNS turns captured unconditionally
+(aicoach-dev#15 — the funnel breaks here, and those turns never trip a signal);
 everyone else only contributes turns that tripped a problem signal, plus a small
 random control sample so the rubric doesn't drift toward only ever seeing bad cases.
 
@@ -30,6 +32,12 @@ SUPERVISED = {t.strip() for t in os.environ.get("SUPERVISED_TENANTS", "").split(
 SUBSTANTIAL_CHARS = 500
 SHORT_ANSWER_CHARS = 600
 
+# First N turns of a brand-new tenant are captured unconditionally (aicoach-dev#15).
+# The funnel breaks here — most new tenants don't get past message one, and those
+# turns never trip a problem signal (nothing wrong with a short first exchange).
+# "New" is self-referential: a tenant with fewer stored cases than this is new.
+ONBOARDING_TURNS = 3
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cases (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,7 +45,7 @@ CREATE TABLE IF NOT EXISTS cases (
     day         INTEGER NOT NULL,
     tenant      TEXT NOT NULL,       -- same hashed tenant id used everywhere
     skill       TEXT,                -- skill actually applied (via load_skill)
-    reasons     TEXT NOT NULL,       -- why captured: budget,short_answer,no_memory_write,full,control
+    reasons     TEXT NOT NULL,       -- why captured: budget,short_answer,no_memory_write,full,control,onboarding
     user_len    INTEGER NOT NULL,
     answer_len  INTEGER NOT NULL,
     tools       TEXT,                -- tool names called this turn
@@ -85,10 +93,28 @@ def init():
         c.executescript(_SCHEMA)
 
 
+def _case_count(tenant):
+    """How many cases this tenant already has stored. The definition of 'new'
+    is self-referential (aicoach-dev#15): a tenant with fewer than
+    ONBOARDING_TURNS stored cases is new, so their first turns land in the
+    layer regardless of signals. Returns ONBOARDING_TURNS on error so the
+    onboarding rule degrades to a no-op, not a double-capture."""
+    try:
+        with _conn() as c:
+            return c.execute(
+                "SELECT COUNT(*) FROM cases WHERE tenant = ?", (tenant,)
+            ).fetchone()[0]
+    except Exception:
+        return ONBOARDING_TURNS
+
+
 def reasons_for(tenant, user_len, answer_len, tools_used, budget_exhausted):
     """Why (if at all) this turn is worth keeping. Empty list = don't store."""
     if tenant in SUPERVISED:
         return ["full"]
+
+    if _case_count(tenant) < ONBOARDING_TURNS:
+        return ["onboarding"]
 
     out = []
     if budget_exhausted:

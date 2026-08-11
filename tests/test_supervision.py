@@ -26,6 +26,20 @@ LONG = "x" * 800   # substantial user input
 SHORT = "y" * 100  # trivial input
 
 
+def _seed_established(tenant, n=3):
+    """Insert n already-reviewed seed cases so the tenant counts as
+    established for the onboarding rule (aicoach-dev#15). Reviewed cases
+    don't pollute the pending queue."""
+    now = time.time()
+    with supervision._conn() as c:
+        for _ in range(n):
+            c.execute(
+                "INSERT INTO cases (ts, day, tenant, reasons, user_len, answer_len, "
+                "tools, payload, reviewed) VALUES (?, ?, ?, 'seed', 1, 1, '', '{}', 1)",
+                (now, int(now // 86400), tenant),
+            )
+
+
 def test_flagged_tenant_captures_everything(db, monkeypatch):
     monkeypatch.setattr(supervision, "SUPERVISED", {"me"})
     r = supervision.reasons_for("me", 10, 5000, ["save_memory"], False)
@@ -34,16 +48,19 @@ def test_flagged_tenant_captures_everything(db, monkeypatch):
 
 def test_healthy_turn_is_not_captured(db):
     """Substantial input, long answer, memory written -> nothing to review."""
+    _seed_established("other", 3)  # established tenant, past onboarding
     r = supervision.reasons_for("other", len(LONG), 3000, ["recall", "save_memory"], False)
     assert r == []
 
 
 def test_budget_exhaustion_is_captured(db):
+    _seed_established("other", 3)
     r = supervision.reasons_for("other", len(LONG), 3000, ["save_memory"], True)
     assert "budget" in r
 
 
 def test_short_answer_to_substantial_input_is_captured(db):
+    _seed_established("other", 3)
     r = supervision.reasons_for("other", len(LONG), 200, ["save_memory"], False)
     assert "short_answer" in r
 
@@ -56,17 +73,20 @@ def test_short_answer_to_substantial_input_is_captured(db):
 
 def test_trivial_input_does_not_trip_signals(db):
     """A one-liner deserves a short answer and no memory — that's not a defect."""
+    _seed_established("other", 3)
     r = supervision.reasons_for("other", len(SHORT), 200, [], False)
     assert r == []
 
 
 def test_control_sample_can_capture_healthy_turns(db, monkeypatch):
     monkeypatch.setattr(supervision, "SAMPLE_PCT", 100)  # always sample
+    _seed_established("other", 3)
     r = supervision.reasons_for("other", len(LONG), 3000, ["save_memory"], False)
     assert r == ["control"]
 
 
 def test_capture_roundtrip_preserves_content(db):
+    _seed_established("me2", 3)  # established tenant, past onboarding
     supervision.capture("me2", "вопрос человека", "ответ коуча",
                         skill="Integrative Personal Coaching v1",
                         tools_used=["recall"], budget_exhausted=True)
@@ -226,3 +246,72 @@ def test_pass_stats_by_tenant(db):
     by_tenant = {t: (total, writes) for t, total, writes in stats["by_tenant"]}
     assert by_tenant["alice"] == (2, 1)  # 2 passes, 1 with writes
     assert by_tenant["bob"] == (1, 1)
+
+
+# ── onboarding capture (aicoach-dev#15) ──────────────────────────────────────
+# The funnel breaks at the very first turns: most new tenants don't get past
+# message one. Those turns never trip a problem signal (there's nothing wrong
+# with a short first exchange), so they never enter the quality layer. The
+# onboarding rule captures the first ONBOARDING_TURNS turns of a brand-new
+# tenant unconditionally — "new" is self-referential: counted by how many
+# cases this tenant already has stored.
+
+
+def test_new_tenant_first_turn_is_captured(db):
+    """A brand-new tenant's first turn is captured regardless of signals —
+    trivial input, short answer, no budget issue, still captured."""
+    r = supervision.reasons_for("newcomer", len(SHORT), 200, [], False)
+    assert r == ["onboarding"]
+
+
+def test_new_tenant_second_and_third_turns_still_captured(db):
+    """With 1 and 2 stored cases the tenant is still 'new' — capture continues."""
+    _seed_established("newcomer", 1)
+    assert supervision.reasons_for("newcomer", len(SHORT), 200, [], False) == ["onboarding"]
+    _seed_established("newcomer", 1)  # 2 total
+    assert supervision.reasons_for("newcomer", len(SHORT), 200, [], False) == ["onboarding"]
+
+
+def test_fourth_turn_follows_normal_rules(db):
+    """After 3 stored cases the tenant is established — only signals capture."""
+    _seed_established("newcomer", 3)
+    r = supervision.reasons_for("newcomer", len(SHORT), 200, [], False)
+    assert r == [], "no signal on turn 4+ → not captured"
+
+
+def test_fourth_turn_captured_when_signal_fires(db):
+    """An established tenant's turn is still captured if a signal fires."""
+    _seed_established("established", 3)
+    r = supervision.reasons_for("established", len(LONG), 3000, ["save_memory"], True)
+    assert "budget" in r
+    assert "onboarding" not in r
+
+
+def test_supervised_tenant_gets_full_not_onboarding(db, monkeypatch):
+    """A flagged tenant is captured with 'full'; the onboarding rule doesn't
+    conflict (AC: observed tenant still captured fully)."""
+    monkeypatch.setattr(supervision, "SUPERVISED", {"watched"})
+    r = supervision.reasons_for("watched", len(SHORT), 200, [], False)
+    assert r == ["full"]
+
+
+def test_onboarding_reason_is_distinguishable(db):
+    """The 'onboarding' reason must be distinct from all prior reasons so these
+    cases can be selected separately (AC)."""
+    r = supervision.reasons_for("newcomer", len(SHORT), 200, [], False)
+    assert r == ["onboarding"]
+    assert "onboarding" not in ("budget", "short_answer", "no_memory_write",
+                                "full", "control")
+
+
+def test_onboarding_turns_end_to_end(db):
+    """AC test: new tenant's first three turns in the DB; the fourth only if
+    a signal fires."""
+    supervision.capture("newbie", "ход 1", "ответ 1")
+    supervision.capture("newbie", "ход 2", "ответ 2")
+    supervision.capture("newbie", "ход 3", "ответ 3")
+    supervision.capture("newbie", "ход 4", "ответ 4")  # no signal → not captured
+    cases = supervision.pending(tenant="newbie")
+    assert len(cases) == 3, "first three turns captured, fourth is not"
+    assert all(c["reasons"] == "onboarding" for c in cases)
+    assert [c["user"] for c in cases] == ["ход 1", "ход 2", "ход 3"]
