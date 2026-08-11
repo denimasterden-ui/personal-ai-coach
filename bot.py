@@ -252,12 +252,13 @@ async def _send_text(client, chat_id, text, **kw):
         await _tg(client, "sendMessage", chat_id=chat_id, text=chunk, **kw)
 
 
-async def _ask_brain(client, tenant_id, session_id, text, model=None) -> str:
+async def _ask_brain(client, tenant_id, session_id, text, model=None, light_intro=False) -> str:
     """POST /session, consume the SSE stream, return the final answer text.
     Also logs a memory_write analytics event per save_memory tool call — a
     cheap proxy for "the coach actually learned something this turn"."""
     answer = ""
-    payload = {"tenant_id": tenant_id, "session_id": session_id, "message": text}
+    payload = {"tenant_id": tenant_id, "session_id": session_id, "message": text,
+               "light_intro": light_intro}
     if model:
         payload["model"] = model
     async with client.stream(
@@ -298,6 +299,40 @@ DRAIN_TIMEOUT = float(os.environ.get("DRAIN_TIMEOUT", "85"))  # < systemd Timeou
 LONG_INPUT_CHARS = 2000
 
 
+_GREETING_WORDS = {"привет", "здравствуйте", "добрый", "день", "вечер", "утро",
+                   "hi", "hello", "hey"}
+
+
+def _is_brief_first_message(text: str) -> bool:
+    """Greetings should get an easy first question; a real account should go
+    straight to the coach. The brain, not this small router, still handles
+    safety when a brief message signals an acute state."""
+    words = [word.strip(".,!?…:;").lower() for word in text.split()]
+    return not words or all(word in _GREETING_WORDS for word in words)
+
+
+async def _needs_light_intro(tenant_id: str, text: str, attachment: bool) -> bool:
+    _, light_intro = await _first_contact_route(tenant_id, text, attachment)
+    return light_intro
+
+
+async def _first_contact_route(tenant_id: str, text: str, attachment: bool) -> tuple[bool, bool]:
+    first_contact = not await memory.has_derived_records(tenant_id)
+    return first_contact, first_contact and not attachment and _is_brief_first_message(text)
+
+
+async def _remember_first_contact(tenant_id: str) -> None:
+    """Make first contact durable even when recollection finds no personal fact.
+    It is a derived session record, not a source document, so a week-old return
+    cannot be mistaken for a fresh start after the six-hour session TTL."""
+    result = await memory.save_memory(
+        tenant_id, "session", "Первый контакт через Telegram.", slug="first-contact",
+        source="системная отметка первого контакта",
+    )
+    if isinstance(result, dict) and result.get("error"):
+        print(f"[first-contact] mark failed: {result}", flush=True)
+
+
 async def _typing_keepalive(client, chat_id):
     """Telegram's 'typing' status expires after ~5s — refresh it so the whole
     (possibly minutes-long) brain call reads as active, not frozen."""
@@ -329,6 +364,7 @@ async def _worker(client, chat_id):
             await asyncio.sleep(gap)
         text = "\n\n".join(st["parts"]); st["parts"] = []
         voice = st["voice"]; st["voice"] = False
+        attachment = st["attachment"]; st["attachment"] = False
         tenant = _tenant_id_for(chat_id)
         print(f"[flush] chat={chat_id} chars={len(text)}", flush=True)
         analytics.log("message", tenant, kind="voice" if voice else "text")
@@ -338,7 +374,11 @@ async def _worker(client, chat_id):
         model = ADMIN_MODEL if _is_admin(chat_id) else None
         ka = asyncio.create_task(_typing_keepalive(client, chat_id))
         try:
-            answer = await _ask_brain(client, tenant, f"tg-{chat_id}", text, model=model)
+            first_contact, light_intro = await _first_contact_route(tenant, text, attachment)
+            if first_contact:
+                await _remember_first_contact(tenant)
+            answer = await _ask_brain(client, tenant, f"tg-{chat_id}", text, model=model,
+                                      light_intro=light_intro)
         except Exception as exc:
             # brain unreachable (e.g. mid-deploy restart) — don't leave the user in silence
             print("[flush] brain error:", exc, flush=True)
@@ -355,13 +395,14 @@ async def _worker(client, chat_id):
 
 def _state(chat_id):
     return _chat.setdefault(chat_id, {"parts": [], "voice": False, "last": 0.0,
-                                      "worker": None, "preparing": 0})
+                                      "attachment": False, "worker": None, "preparing": 0})
 
 
 def _buffer(client, chat_id, text, kind="text"):
     st = _state(chat_id)
     st["parts"].append(text)
     st["voice"] = st["voice"] or kind == "voice"
+    st["attachment"] = st["attachment"] or kind == "document"
     st["last"] = time.time()
     w = st["worker"]
     if w is None or w.done():
@@ -643,7 +684,7 @@ async def _handle_inner(client, msg):
                 f"дочитать нечем. Ниже "
                 + (f"только первые {DOC_MAX_CHARS} символов — остального нет."
                    if clipped else "весь распознанный текст."))
-        _buffer(client, chat_id, f"{head}]\n\n{preview}")
+        _buffer(client, chat_id, f"{head}]\n\n{preview}", kind="document")
     else:
         await _tg(client, "sendMessage", chat_id=chat_id,
                   text="Я понимаю текст, голосовые и PDF. Это пока не возьму.")
