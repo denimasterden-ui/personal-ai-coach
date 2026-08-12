@@ -589,7 +589,9 @@ def _onboarding(chat_id: int) -> str:
 # the split the industry settled on (Wysa: nobody eavesdrops on you, staff check
 # the AI's answers; Woebot: we review de-identified conversations). Attention is
 # on the coach's mistakes, and the sentence says exactly that — a reassurance
-# the practice contradicts is worse than no reassurance at all.
+# the practice contradicts is worse than no reassurance at all. It stays in the
+# first person on purpose: «ответы анализируются» would read as a machine doing
+# it, leaving the reader unaware a person may see what they wrote.
 #
 # Key custody is deliberately left to the README: once the notice admits a human
 # may read the разбор, "the key sits on the same server" tells the reader nothing
@@ -598,9 +600,8 @@ PRIVACY_NOTICE = (
     "🔒 Что происходит с твоими словами\n\n"
     "Здесь нет твоего имени, телефона и почты. Разговор не подписан тобой — "
     "ни в файлах, ни в базе.\n\n"
-    "В реальном времени тебя не читает никто. Иногда я перечитываю разборы "
-    "сам — мне важно, где ошибся коуч, а не что рассказал ты. Так он "
-    "становится лучше.\n\n"
+    "В реальном времени тебя не читает никто. Ответы коуча я анализирую на "
+    "соответствие и ошибки — так он становится лучше.\n\n"
     "Ничего не продаётся и никому не передаётся. Рекламы здесь нет.\n\n"
     "Забрать и стереть — в один шаг: /export отдаст всё файлом, "
     "/delete_my_data сотрёт разговоры без копий. Останется обезличенная "

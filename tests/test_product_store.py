@@ -71,7 +71,9 @@ async def test_privacy_notice_admits_a_human_reads_разборы(tg):
     await bot._command(FakeClient(), 42, "/privacy")
 
     text = " ".join(params["text"] for method, params in tg if method == "sendMessage")
-    assert "перечитываю разборы" in text
+    assert "я анализирую" in text, (
+        "must stay first-person: «ответы анализируются» reads as a machine doing "
+        "it, and the reader would never learn a person may see what they wrote")
 
 
 async def test_privacy_notice_answers_the_reader_not_our_processing(tg):
