@@ -84,7 +84,17 @@ async def test_privacy_notice_answers_the_reader_not_our_processing(tg):
     text = " ".join(params["text"] for method, params in tg if method == "sendMessage")
     assert "не продаётся" in text and "не передаётся" in text
     assert "/export" in text and "/delete_my_data" in text
-    assert "имени, телефона" in text
+    assert "анонимно" in text
+
+
+async def test_privacy_notice_does_not_promise_a_psychologist(tg):
+    """CONTRIBUTING.md refuses changes that promise clinical effect, and the
+    first screen disclaims replacing a psychotherapist two taps earlier —
+    calling the coach a психолог here would contradict both."""
+    await bot._command(FakeClient(), 42, "/privacy")
+
+    text = " ".join(params["text"] for method, params in tg if method == "sendMessage")
+    assert "психолог" not in text.lower()
 
 
 async def test_chat_id_survives_reload(tg):
