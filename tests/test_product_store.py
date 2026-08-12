@@ -53,13 +53,27 @@ async def test_start_saves_chat_id(tg):
 
 
 async def test_start_invites_material_and_keeps_the_disclaimer(tg):
-    """The Telegram seam keeps the essential first-contact promises visible."""
+    """The Telegram seam keeps the essential first-contact promises visible.
+    The privacy detail deliberately isn't here — a wall of caveats on screen one
+    is what was scaring people off — but the way to it must be."""
     await bot._command(FakeClient(), 42, "/start")
 
     text = next(params["text"] for method, params in tg if method == "sendMessage")
     assert "тест, опросник либо стенограмму" in text
     assert "не заменяю психотерапевта" in text
-    assert "chat_id" in text
+    assert "/privacy" in text
+
+
+async def test_privacy_notice_states_what_is_true_of_the_code(tg):
+    """Layered notice: the detail lives a tap away. Every claim in it has to
+    match the code — a reassurance the practice contradicts is worse than none.
+    The operator really does read разборы through supervise.py, so it says so."""
+    await bot._command(FakeClient(), 42, "/privacy")
+
+    text = " ".join(params["text"] for method, params in tg if method == "sendMessage")
+    assert "просматриваю" in text, "operator review must be disclosed, not implied away"
+    assert "/delete_my_data" in text
+    assert "оператора" in text, "the key lives on the same server — say it"
 
 
 async def test_chat_id_survives_reload(tg):
@@ -91,6 +105,21 @@ async def test_delete_confirm_removes_chat_id(tg, monkeypatch):
     bot._contacts.clear()
     bot._load_contacts()
     assert "42" not in bot._contacts, "removal must be persisted to disk"
+
+
+async def test_delete_confirm_reaches_the_quality_layer(tg, monkeypatch):
+    """supervision.db holds the ход verbatim too. Deleting only tenants/ left the
+    conversation sitting there while the bot said «вся твоя память удалена»."""
+    forgotten = []
+    monkeypatch.setattr(bot.supervision, "forget_tenant", forgotten.append)
+
+    async def fake_delete(tenant_id):
+        return True
+    monkeypatch.setattr(bot.memory, "delete_tenant", fake_delete)
+
+    await bot._command(FakeClient(), 42, "/delete_confirm")
+
+    assert forgotten == [bot._tenant_id_for(42)]
 
 
 async def test_store_is_encrypted_on_disk(tg, monkeypatch):

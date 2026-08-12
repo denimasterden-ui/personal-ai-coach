@@ -127,6 +127,11 @@ Your first message to the bot returns your `chat_id` — put it in `ALLOWED_CHAT
 - The `chat_id` of everyone who presses `/start` is stored separately in `contacts.enc`, so the bot
   can stay in touch and remember the introduction. With `MEMORY_ENCRYPTION_KEY`, this file is
   encrypted; `/delete_my_data` removes the `chat_id` together with the memory.
+- `/delete_my_data` also clears the quality layer (`supervision.db`): conversation text and the
+  critic's write-up are erased and the tenant is anonymised. What stays is the rating (on target /
+  partly / off) and the turn's trace — which tools the coach called, how much `recall` found —
+  with no text and no link to the person. That's product experience rather than a personal fact,
+  and it's the only signal we have about where the coach gets things wrong.
 - The only outbound traffic is the request to the model you chose. Want **nothing** to leave the
   machine — plug in a local model (Ollama) in `.env`.
 - `chat_id` whitelist: in private mode (the default) the bot answers only the allowed chat.

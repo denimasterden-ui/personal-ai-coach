@@ -569,18 +569,35 @@ def _onboarding(chat_id: int) -> str:
         "Напиши, что происходит, или пришли тест, опросник либо стенограмму — "
         "начнём с материала.\n\n"
         "Я не заменяю психотерапевта и не оказываю мед. помощь.\n\n"
-        "🔒 Храню твой chat_id в служебном файле, чтобы бот помнил знакомство. "
-        "/delete_my_data удалит его вместе с памятью."
+        "🔒 Без имени и телефона, память зашифрована. Забрать — /export, "
+        "стереть — /delete_my_data. Подробнее — /privacy"
     )
     if PUBLIC_MODE and not _is_admin(chat_id):
-        base += (
-            f"\n\n🔒 Это публичное демо (лимит {DAILY_MESSAGE_LIMIT} сообщений/день). "
-            "Память изолирована и шифруется на сервере, но оператор технически "
-            "имеет доступ к ключу — не пиши того, что не готов ему доверить. Для "
-            "полной приватности разверни свой инстанс:\n"
-            "github.com/denimasterden-ui/personal-ai-coach"
-        )
+        base += f"\n\nЭто публичное демо, лимит {DAILY_MESSAGE_LIMIT} сообщений в день."
     return base
+
+
+# Layered privacy notice: the first screen carries one warm line, the detail
+# lives here a tap away. This is the just-in-time pattern the ICO recommends,
+# and it exists because the previous fifteen-line wall of caveats was scaring
+# people off before they wrote a word — five of thirteen tenants never did.
+# Every claim below must stay true to the code: the operator really does read
+# разборы through supervise.py, so that is stated plainly rather than implied
+# away — a reassurance the practice contradicts is worse than no reassurance.
+PRIVACY_NOTICE = (
+    "🔒 Коротко и честно\n\n"
+    "• Я не спрашиваю имя, телефон и почту. Профиль лежит под случайным "
+    "идентификатором, а не под твоим именем.\n"
+    "• Память шифруется на сервере. Ключ там же — то есть от меня как "
+    "оператора шифрование не защищает, от постороннего защищает.\n"
+    "• Разборы я иногда просматриваю сам — так коуч становится лучше. "
+    "Если это не подходит, лучше не начинать.\n"
+    "• /export — забрать всё файлом. /delete_my_data — стереть память и "
+    "текст разговоров. Остаётся обезличенная пометка «попал / мимо» без "
+    "текста и без привязки к тебе: по ней я вижу, где коуч ошибается.\n\n"
+    "Хочешь полной приватности — код открыт, разверни свой:\n"
+    "github.com/denimasterden-ui/personal-ai-coach"
+)
 
 
 async def _send_document(client, chat_id, filename, content):
@@ -639,6 +656,8 @@ async def _command(client, chat_id, text):
             await _tg(client, "sendMessage", chat_id=chat_id, text="Пока нечего экспортировать.")
         else:
             await _send_document(client, chat_id, "aicoach-memory.md", dump)
+    elif cmd == "/privacy":
+        await _send_text(client, chat_id, PRIVACY_NOTICE)
     elif cmd == "/delete_my_data":
         # Telegram auto-links /commands in message text, so /delete_confirm below
         # renders as a single tappable confirmation — no typed argument needed.
@@ -647,6 +666,10 @@ async def _command(client, chat_id, text):
                        "забрать её через /export.\n\nЧтобы подтвердить — нажми /delete_confirm")
     elif cmd == "/delete_confirm":
         ok = await memory.delete_tenant(tenant)
+        # The quality layer holds the ход verbatim too — deleting only tenants/
+        # left the conversation sitting in supervision.db while the bot said
+        # "вся твоя память удалена". Text goes, the anonymous rating stays.
+        await asyncio.to_thread(supervision.forget_tenant, tenant)
         # also drop the live in-RAM conversation in the service, else the coach
         # keeps "remembering" from session context (and may re-save) until TTL.
         try:
@@ -695,6 +718,7 @@ _COMMANDS = [
     {"command": "portrait", "description": "Собрать связный портрет"},
     {"command": "export", "description": "Забрать свою память файлом .md"},
     {"command": "weekly", "description": "Еженедельное напоминание вернуться к рефлексии"},
+    {"command": "privacy", "description": "Что хранится и кто это видит"},
     {"command": "delete_my_data", "description": "Стереть всё о тебе"},
 ]
 

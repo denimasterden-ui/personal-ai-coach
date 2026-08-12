@@ -302,11 +302,55 @@ def mark_reviewed(case_id, verdict):
 
 
 def purge(days=RETENTION_DAYS):
-    """Drop cases past retention. Returns how many were removed."""
+    """Drop cases and passes past retention, plus the ratings that went with
+    them. A rating whose case is gone is unreadable anyway — «мимо» means
+    nothing without the trace it points at — so it must not outlive it."""
     cutoff = int(time.time() // 86400) - days
     with _conn() as c:
         cur = c.execute("DELETE FROM cases WHERE day < ?", (cutoff,))
+        c.execute("DELETE FROM passes WHERE day < ?", (cutoff,))
+        c.execute("DELETE FROM ratings WHERE ts < ?", (cutoff * 86400,))
         return cur.rowcount
+
+
+# Sentinel that replaces the tenant hash once a person asks to be deleted. All
+# deleted people collapse into one bucket, so nothing groups back into a person.
+DELETED_TENANT = "(deleted)"
+
+
+def forget_tenant(tenant):
+    """Erase everything a person said, keep what we learned from it.
+
+    /delete_my_data must remove the conversation itself: `payload` holds the
+    verbatim ход, and `verdict` is the critic's write-up of it, which quotes.
+    Both are cleared, and the tenant hash is replaced by a sentinel so the rows
+    can never be grouped back into a person.
+
+    What survives is deliberately not about the person: the rating («в точку /
+    частично / мимо») and the structured trace beside it — which tools the coach
+    called, how much recall found, which skill ran. That is product experience,
+    not a personal fact, and it is the only prospective signal we have about
+    where the coach is wrong. Keeping it costs the person nothing: it no longer
+    contains their words and no longer points at them.
+
+    Returns how many rows were anonymised. Never raises — deletion must not fail
+    because the quality layer had a bad day."""
+    try:
+        with _conn() as c:
+            cur = c.execute(
+                "UPDATE cases SET payload = ?, verdict = NULL, tenant = ? WHERE tenant = ?",
+                (b"", DELETED_TENANT, tenant),
+            )
+            c.execute(
+                "UPDATE passes SET payload = ?, tenant = ? WHERE tenant = ?",
+                (b"", DELETED_TENANT, tenant),
+            )
+            c.execute("UPDATE ratings SET tenant = ? WHERE tenant = ?",
+                      (DELETED_TENANT, tenant))
+            return cur.rowcount
+    except Exception as exc:
+        print("[supervision] forget_tenant error:", exc, flush=True)
+        return 0
 
 
 def stats():

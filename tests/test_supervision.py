@@ -189,6 +189,90 @@ def test_purge_drops_old_cases_only(db):
     assert supervision.pending()[0]["id"] == fresh_id
 
 
+def test_purge_takes_ratings_with_the_case_they_point_at(db):
+    """A rating outliving its case is unreadable — «мимо» says nothing without
+    the trace beside it — and would otherwise pile up in the db forever."""
+    old_ts = time.time() - 200 * 86400
+    with supervision._conn() as c:
+        c.execute("INSERT INTO ratings (ts, tenant, turn_id, rating) VALUES (?, 'old', 'stale', 'miss')",
+                  (old_ts,))
+    supervision.save_rating("me2", "fresh", "hit")
+
+    supervision.purge(days=90)
+
+    assert supervision.get_rating("stale") is None
+    assert supervision.get_rating("fresh") == "hit"
+
+
+# ── deletion: the story goes, the lesson stays ────────────────────────────────
+
+
+def test_delete_erases_what_the_person_said(db):
+    """The promise «стереть текст разговоров» has to hold in the quality layer
+    too — this table held the ход verbatim while the bot claimed it was gone."""
+    supervision.capture("alice", "у меня выгорание на работе" * 40, "ответ коуча",
+                        budget_exhausted=True)
+    supervision.log_pass("alice", tool_names=["recall"], recall_count=1,
+                         user_text="у меня выгорание", answer="ответ коуча")
+
+    supervision.forget_tenant("alice")
+
+    with supervision._conn() as c:
+        payloads = [r[0] for r in c.execute("SELECT payload FROM cases").fetchall()]
+        payloads += [r[0] for r in c.execute("SELECT payload FROM passes").fetchall()]
+    blob = b"".join(p for p in payloads if p)
+    assert "выгорание".encode() not in blob
+    assert blob == b"", "no trace of the conversation may survive deletion"
+
+
+def test_delete_unlinks_the_rows_from_the_person(db):
+    supervision.capture("alice", "a" * 900, "b", budget_exhausted=True, turn_id="t1")
+    supervision.save_rating("alice", "t1", "miss")
+
+    supervision.forget_tenant("alice")
+
+    with supervision._conn() as c:
+        tenants = {r[0] for r in c.execute("SELECT tenant FROM cases").fetchall()}
+        tenants |= {r[0] for r in c.execute("SELECT tenant FROM ratings").fetchall()}
+    assert tenants == {supervision.DELETED_TENANT}, "nothing may group back into a person"
+
+
+def test_delete_keeps_the_rating_and_its_trace(db):
+    """Denis's call: the rating is product experience, not a personal fact. It
+    survives deletion — stripped of text and of any link to who gave it."""
+    supervision.capture("alice", "a" * 900, "b", budget_exhausted=True,
+                        turn_id="t1", tools_used=["recall"])
+    supervision.save_rating("alice", "t1", "miss")
+
+    supervision.forget_tenant("alice")
+
+    assert supervision.get_rating("t1") == "miss"
+    with supervision._conn() as c:
+        tools, reasons = c.execute(
+            "SELECT tools, reasons FROM cases WHERE turn_id = 't1'").fetchone()
+    assert tools == "recall", "the trace that makes «мимо» diagnosable must stay"
+    assert reasons
+
+
+def test_delete_leaves_other_people_alone(db):
+    supervision.capture("alice", "a" * 900, "b", budget_exhausted=True, turn_id="t1")
+    supervision.capture("bob", "c" * 900, "d", budget_exhausted=True, turn_id="t2")
+    supervision.save_rating("bob", "t2", "hit")
+
+    supervision.forget_tenant("alice")
+
+    bob = [c for c in supervision.pending() if c["tenant"] == "bob"]
+    assert len(bob) == 1
+    assert bob[0]["answer"] == "d", "another person's разбор must be untouched"
+    assert supervision.get_rating("t2") == "hit"
+
+
+def test_delete_never_raises_into_the_flow(db, monkeypatch):
+    """Deletion must not fail because the quality layer had a bad day."""
+    monkeypatch.setattr(supervision, "DB_FILE", "/nonexistent/dir/sup.db")
+    assert supervision.forget_tenant("alice") == 0
+
+
 # ── passes (memory extraction pass trace, aicoach-dev#11) ─────────────────────
 
 
