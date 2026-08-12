@@ -52,6 +52,16 @@ async def test_start_saves_chat_id(tg):
     assert bot.PRODUCT_STORE_FILE.exists(), "store must be persisted to disk"
 
 
+async def test_start_invites_material_and_keeps_the_disclaimer(tg):
+    """The Telegram seam keeps the essential first-contact promises visible."""
+    await bot._command(FakeClient(), 42, "/start")
+
+    text = next(params["text"] for method, params in tg if method == "sendMessage")
+    assert "тест, опросник либо стенограмму" in text
+    assert "не заменяю психотерапевта" in text
+    assert "chat_id" in text
+
+
 async def test_chat_id_survives_reload(tg):
     """A bot restart (RAM cleared) must not lose the chat_id — reload from disk."""
     await bot._command(FakeClient(), 42, "/start")

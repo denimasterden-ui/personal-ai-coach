@@ -15,9 +15,9 @@ human-readable `.md` files that you own. Voice or text, from Telegram.
 ![AICOACH — a coaching turn in Telegram](assets/demo-en.svg)
 
 **[→ @ai_coach_integrated_bot](https://t.me/ai_coach_integrated_bot)** — a live demo bot on Telegram.
-Tell it what's on your mind, and get a structured reflection back. `/start` — what it is and how it
-works, `/memory` — what the bot has understood about you, `/export` — take your memory with you,
-`/delete_my_data` — wipe everything.
+Tell it what's on your mind, or send your own test result, questionnaire, or transcript, and get a
+structured reflection back. `/start` — what it is and how it works, `/memory` — what the bot has
+understood about you, `/export` — take your memory with you, `/delete_my_data` — wipe everything.
 
 > The demo is a shared public instance: each chat gets its own isolated, anonymized profile, memory
 > is encrypted at rest, and there's a 30-message daily cap. But it is **not** zero-knowledge (the
@@ -124,6 +124,9 @@ Your first message to the bot returns your `chat_id` — put it in `ALLOWED_CHAT
 ## Privacy
 
 - Profile and conversation live in `tenants/` (in `.gitignore`, never leave the machine).
+- The `chat_id` of everyone who presses `/start` is stored separately in `contacts.enc`, so the bot
+  can stay in touch and remember the introduction. With `MEMORY_ENCRYPTION_KEY`, this file is
+  encrypted; `/delete_my_data` removes the `chat_id` together with the memory.
 - The only outbound traffic is the request to the model you chose. Want **nothing** to leave the
   machine — plug in a local model (Ollama) in `.env`.
 - `chat_id` whitelist: in private mode (the default) the bot answers only the allowed chat.
