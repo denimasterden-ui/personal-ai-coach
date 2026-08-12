@@ -64,16 +64,25 @@ async def test_start_invites_material_and_keeps_the_disclaimer(tg):
     assert "/privacy" in text
 
 
-async def test_privacy_notice_states_what_is_true_of_the_code(tg):
-    """Layered notice: the detail lives a tap away. Every claim in it has to
-    match the code — a reassurance the practice contradicts is worse than none.
-    The operator really does read разборы through supervise.py, so it says so."""
+async def test_privacy_notice_admits_a_human_reads_разборы(tg):
+    """The one claim the copy may never soften away: supervise.py really does put
+    the ход in front of the operator, and «увидит ли это живой человек» is the
+    question someone about to write about their divorce is actually asking."""
     await bot._command(FakeClient(), 42, "/privacy")
 
     text = " ".join(params["text"] for method, params in tg if method == "sendMessage")
-    assert "просматриваю" in text, "operator review must be disclosed, not implied away"
-    assert "/delete_my_data" in text
-    assert "оператора" in text, "the key lives on the same server — say it"
+    assert "перечитываю разборы" in text
+
+
+async def test_privacy_notice_answers_the_reader_not_our_processing(tg):
+    """Written around what the reader fears — who sees this, is it sold, can I
+    take it back — rather than around how we handle data."""
+    await bot._command(FakeClient(), 42, "/privacy")
+
+    text = " ".join(params["text"] for method, params in tg if method == "sendMessage")
+    assert "не продаётся" in text and "не передаётся" in text
+    assert "/export" in text and "/delete_my_data" in text
+    assert "имени, телефона" in text
 
 
 async def test_chat_id_survives_reload(tg):

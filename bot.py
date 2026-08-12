@@ -578,24 +578,34 @@ def _onboarding(chat_id: int) -> str:
 
 
 # Layered privacy notice: the first screen carries one warm line, the detail
-# lives here a tap away. This is the just-in-time pattern the ICO recommends,
-# and it exists because the previous fifteen-line wall of caveats was scaring
-# people off before they wrote a word — five of thirteen tenants never did.
-# Every claim below must stay true to the code: the operator really does read
-# разборы through supervise.py, so that is stated plainly rather than implied
-# away — a reassurance the practice contradicts is worse than no reassurance.
+# lives here a tap away (the just-in-time pattern the ICO recommends). It exists
+# because fifteen lines of caveats were scaring people off before they wrote a
+# word — five of thirteen tenants never did.
+#
+# Written to answer what the reader is actually afraid of — who will see this,
+# is someone watching, will it be sold, can I take it back — not to describe our
+# processing. The one thing it must never do is trade honesty for warmth: the
+# operator really does read разборы through supervise.py, so that is said, in
+# the split the industry settled on (Wysa: nobody eavesdrops on you, staff check
+# the AI's answers; Woebot: we review de-identified conversations). Attention is
+# on the coach's mistakes, and the sentence says exactly that — a reassurance
+# the practice contradicts is worse than no reassurance at all.
+#
+# Key custody is deliberately left to the README: once the notice admits a human
+# may read the разбор, "the key sits on the same server" tells the reader nothing
+# new about their exposure and costs a paragraph of dread.
 PRIVACY_NOTICE = (
-    "🔒 Коротко и честно\n\n"
-    "• Я не спрашиваю имя, телефон и почту. Профиль лежит под случайным "
-    "идентификатором, а не под твоим именем.\n"
-    "• Память шифруется на сервере. Ключ там же — то есть от меня как "
-    "оператора шифрование не защищает, от постороннего защищает.\n"
-    "• Разборы я иногда просматриваю сам — так коуч становится лучше. "
-    "Если это не подходит, лучше не начинать.\n"
-    "• /export — забрать всё файлом. /delete_my_data — стереть память и "
-    "текст разговоров. Остаётся обезличенная пометка «попал / мимо» без "
-    "текста и без привязки к тебе: по ней я вижу, где коуч ошибается.\n\n"
-    "Хочешь полной приватности — код открыт, разверни свой:\n"
+    "🔒 Что происходит с твоими словами\n\n"
+    "Здесь нет твоего имени, телефона и почты. Разговор не подписан тобой — "
+    "ни в файлах, ни в базе.\n\n"
+    "В реальном времени тебя не читает никто. Иногда я перечитываю разборы "
+    "сам — мне важно, где ошибся коуч, а не что рассказал ты. Так он "
+    "становится лучше.\n\n"
+    "Ничего не продаётся и никому не передаётся. Рекламы здесь нет.\n\n"
+    "Забрать и стереть — в один шаг: /export отдаст всё файлом, "
+    "/delete_my_data сотрёт разговоры без копий. Останется обезличенная "
+    "пометка «попал / мимо» — без текста и без связи с тобой.\n\n"
+    "Хочешь, чтобы всё крутилось только у тебя, — код открыт:\n"
     "github.com/denimasterden-ui/personal-ai-coach"
 )
 
