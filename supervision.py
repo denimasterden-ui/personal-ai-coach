@@ -271,8 +271,9 @@ def _decode(blob):
 
 def pending(limit=50, tenant=None):
     """Un-reviewed cases, oldest first, with content decrypted. Optionally scoped
-    to one tenant. Includes user rating (if any) via LEFT JOIN so the critic can
-    see whether the person already rated the разбор."""
+    to one tenant. Carries the person's rating (if any) via LEFT JOIN — for the
+    operator to read beside the trace, not for the critic's prompt: see
+    supervise._headline for why the two must stay apart."""
     where = "c.reviewed = 0" + (" AND c.tenant = ?" if tenant else "")
     params = ([tenant, limit] if tenant else [limit])
     with _conn() as c:
@@ -337,8 +338,12 @@ def forget_tenant(tenant):
     because the quality layer had a bad day."""
     try:
         with _conn() as c:
+            # reviewed = 1: there is nothing left to review. Without it the
+            # emptied cases sit in pending() forever, failing to decode on every
+            # supervision run.
             cur = c.execute(
-                "UPDATE cases SET payload = ?, verdict = NULL, tenant = ? WHERE tenant = ?",
+                "UPDATE cases SET payload = ?, verdict = NULL, reviewed = 1, "
+                "tenant = ? WHERE tenant = ?",
                 (b"", DELETED_TENANT, tenant),
             )
             c.execute(

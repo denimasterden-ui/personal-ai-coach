@@ -108,6 +108,25 @@ def _case_prompt(case):
     )
 
 
+_RATING_LABEL = {"hit": "в точку", "partial": "частично", "miss": "мимо"}
+
+
+def _headline(case):
+    """The case header, with the person's rating next to the tools the coach
+    called. That pairing is the whole point: «мимо» when recall was never called
+    diagnoses the search, «мимо» with recall in the trace diagnoses the разбор.
+
+    The rating deliberately does not go into _case_prompt. The model judge is
+    discredited (R5), which makes the person's rating the one independent signal
+    we have — show it to the critic and it anchors on the answer instead of
+    judging, and the two stop being comparable."""
+    parts = [f"КЕЙС {case['id']}", f"скилл: {case['skill'] or '—'}",
+             f"признак: {case['reasons']}", f"инструменты: {case['tools'] or '—'}"]
+    if case.get("rating"):
+        parts.append(f"человек: {_RATING_LABEL.get(case['rating'], case['rating'])}")
+    return " · ".join(parts)
+
+
 async def _review(client, case, model):
     system = RUBRIC.format(skill_criterion=_criterion(case["skill"]),
                            catalogue=_catalogue())
@@ -172,7 +191,7 @@ async def main():
             continue
         supervision.mark_reviewed(case["id"], verdict)
         print("=" * 70)
-        print(f"КЕЙС {case['id']} · скилл: {case['skill'] or '—'} · признак: {case['reasons']}")
+        print(_headline(case))
         print("=" * 70)
         print(verdict)
         print()

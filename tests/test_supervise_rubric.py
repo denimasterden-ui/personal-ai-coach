@@ -32,3 +32,31 @@ def test_case_prompt_names_the_applied_optic(monkeypatch):
 def test_catalogue_survives_an_empty_skills_dir(monkeypatch):
     monkeypatch.setattr(supervise.memory, "_catalog_sync", lambda: [])
     assert supervise._catalogue()  # must render something, not crash
+
+
+# ── the person's rating, beside the trace (aicoach-dev#12, п.22) ──────────────
+
+
+def test_headline_puts_the_rating_next_to_the_tools():
+    """«Мимо» при пустом recall и «мимо» при пяти найденных записях — два разных
+    диагноза: первое про поиск, второе про разбор. Оба видны только рядом."""
+    line = supervise._headline({"id": 7, "skill": None, "reasons": "onboarding",
+                                "tools": "recall", "rating": "miss"})
+    assert "мимо" in line.lower()
+    assert "recall" in line
+
+
+def test_headline_says_nothing_when_nobody_rated():
+    line = supervise._headline({"id": 7, "skill": None, "reasons": "full",
+                                "tools": "", "rating": None})
+    assert "мимо" not in line.lower() and "точку" not in line.lower()
+
+
+def test_rating_is_kept_out_of_the_critic_prompt():
+    """Deliberate: the model judge was discredited (R5), so the person's rating
+    is the one independent signal we have. Handing it to the critic would let it
+    anchor on the answer instead of judging, and contaminate the comparison."""
+    case = {"reasons": "full", "tools": "recall", "skill": None,
+            "user": "вопрос", "answer": "ответ", "rating": "miss"}
+    text = supervise._case_prompt(case)
+    assert "miss" not in text and "мимо" not in text.lower()

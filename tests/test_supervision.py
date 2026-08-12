@@ -267,6 +267,16 @@ def test_delete_leaves_other_people_alone(db):
     assert supervision.get_rating("t2") == "hit"
 
 
+def test_deleted_cases_leave_the_review_queue(db):
+    """An emptied case has nothing left to review — left pending it would fail to
+    decode on every supervision run, forever."""
+    supervision.capture("alice", "a" * 900, "b", budget_exhausted=True)
+
+    supervision.forget_tenant("alice")
+
+    assert supervision.pending() == []
+
+
 def test_delete_never_raises_into_the_flow(db, monkeypatch):
     """Deletion must not fail because the quality layer had a bad day."""
     monkeypatch.setattr(supervision, "DB_FILE", "/nonexistent/dir/sup.db")
