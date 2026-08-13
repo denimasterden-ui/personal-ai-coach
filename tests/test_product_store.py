@@ -54,14 +54,18 @@ async def test_start_saves_chat_id(tg):
 
 async def test_start_invites_material_and_keeps_the_disclaimer(tg):
     """The Telegram seam keeps the essential first-contact promises visible.
-    The privacy detail deliberately isn't here — a wall of caveats on screen one
-    is what was scaring people off — but the way to it must be."""
+    First contact is now two beats (R4 Г1): the invitation and material hint
+    lead, the honest frame and the way to /privacy follow in a second message.
+    The privacy detail deliberately isn't inlined — a wall of caveats on screen
+    one is what was scaring people off — but the way to it must be."""
     await bot._command(FakeClient(), 42, "/start")
 
-    text = next(params["text"] for method, params in tg if method == "sendMessage")
-    assert "тест, опросник либо стенограмму" in text
-    assert "не заменяю психотерапевта" in text
-    assert "/privacy" in text
+    texts = [params["text"] for method, params in tg if method == "sendMessage"]
+    joined = " ".join(texts)
+    assert len(texts) == 2, "first contact is two beats: invitation, then frames"
+    assert "тест, опросник или стенограмму" in texts[0], "material hint leads"
+    assert "не терапевт" in joined, "the honest frame must stay visible"
+    assert "/privacy" in joined, "the path to the privacy detail must stay"
 
 
 async def test_privacy_notice_admits_a_human_reads_разборы(tg):

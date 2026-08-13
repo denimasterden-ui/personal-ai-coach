@@ -563,14 +563,52 @@ def _buffer(client, chat_id, text, kind="text"):
         w.add_done_callback(_inflight.discard)
 
 
+# First contact is two beats (R4 Г1/Г5): the intro leads with who I am, what
+# happens here, and a low-threshold invitation — no negations. The honest limits
+# («not a therapist») live in _frames() and are sent as a second message, after
+# the invitation, not as a wall of caveats before the first word. Three entry
+# buttons lower the threshold further and attribute the chosen door (the funnel
+# signal R4 found missing — every source was "direct").
+_ENTRY_CHOICES = {
+    "work": "Работа и дело",
+    "relations": "Отношения",
+    "decision": "Решение, что не даётся",
+}
+_ENTRY_PROMPTS = {
+    "work": "Окей, работа и дело. Что именно сейчас цепляет — конкретная "
+            "ситуация, человек или ощущение в целом? Расскажи, как есть.",
+    "relations": "Окей, отношения. С кем и что происходит? Можно с любого "
+                 "места — я соберу картину.",
+    "decision": "Окей, решение, которое не даётся. Между чем и чем выбираешь "
+                "— и что мешает выбрать? Расскажи своими словами.",
+}
+
+
+def _entry_keyboard():
+    return {"inline_keyboard": [
+        [{"text": _ENTRY_CHOICES["work"], "callback_data": "entry:work"}],
+        [{"text": _ENTRY_CHOICES["relations"], "callback_data": "entry:relations"}],
+        [{"text": _ENTRY_CHOICES["decision"], "callback_data": "entry:decision"}],
+    ]}
+
+
 def _onboarding(chat_id: int) -> str:
+    return (
+        "Привет. Я — коуч-разборщик: помогаю распутать то, что крутится в "
+        "голове, и найти, за что в этом ухватиться.\n\n"
+        "Как это работает: расскажи, что происходит — словами или голосом. "
+        "Можно принести тест, опросник или стенограмму разговора. Я помогу "
+        "увидеть, что за этим стоит, и один конкретный шаг дальше.\n\n"
+        "С чего начнём? Опиши своими словами — или нажми, что ближе:"
+    )
+
+
+def _frames(chat_id: int) -> str:
     base = (
-        "🧭 Разберём один важный для тебя вопрос.\n\n"
-        "Напиши, что происходит, или пришли тест, опросник либо стенограмму — "
-        "начнём с материала.\n\n"
-        "Я не заменяю психотерапевта и не оказываю мед. помощь.\n\n"
+        "Пара честных рамок: я не терапевт и не заменяю помощь в кризисе — "
+        "если тяжело прямо сейчас, лучше к живому специалисту.\n\n"
         "🔒 Без имени и телефона, память зашифрована. Забрать — /export, "
-        "стереть — /delete_my_data. Подробнее — /privacy"
+        "стереть — /delete_my_data, подробнее — /privacy"
     )
     if PUBLIC_MODE and not _is_admin(chat_id):
         base += f"\n\nЭто публичное демо, лимит {DAILY_MESSAGE_LIMIT} сообщений в день."
@@ -638,9 +676,13 @@ async def _command(client, chat_id, text):
         if cid not in _contacts:
             _contacts[cid] = {}
             _save_contacts()
+        # ①: intro + value + entry buttons — the primary, low-threshold action.
+        await _tg(client, "sendMessage", chat_id=chat_id,
+                  text=_onboarding(chat_id), reply_markup=_entry_keyboard())
+        # ②: honest frames as a second beat; carries the tour as a secondary offer.
         tour_done = _contacts[cid].get("tour") == "done"
         kw = {} if tour_done else {"reply_markup": _tour_offer_keyboard()}
-        await _tg(client, "sendMessage", chat_id=chat_id, text=_onboarding(chat_id), **kw)
+        await _tg(client, "sendMessage", chat_id=chat_id, text=_frames(chat_id), **kw)
     elif cmd == "/memory":
         summary = await memory.summarize(tenant)
         await _send_text(client, chat_id,
@@ -935,6 +977,27 @@ async def _handle_tour_callback(client, cq_id, chat_id, action):
     await _tg(client, "answerCallbackQuery", callback_query_id=cq_id)
 
 
+async def _handle_entry_callback(client, cq_id, chat_id, message_id, choice):
+    """Handle an onboarding entry button: drop the keyboard first so a stale
+    message can't be re-tapped into a second log, then log the chosen door
+    (funnel attribution R4 lacked), send one narrowing question, acknowledge.
+    If the keyboard can't be cleared the buttons stay live — so we don't log or
+    prompt, just acknowledge and let the person tap again (recorded once).
+    Never calls the brain — the person's next free-text turn does that."""
+    try:
+        await _tg(client, "editMessageReplyMarkup", chat_id=chat_id,
+                  message_id=message_id, reply_markup={"inline_keyboard": []})
+    except Exception as exc:
+        print(f"[entry] editMessageReplyMarkup failed, not logging: {exc}", flush=True)
+        await _tg(client, "answerCallbackQuery", callback_query_id=cq_id)
+        return
+    tenant = _tenant_id_for(chat_id)
+    analytics.log("onboarding_choice", tenant, kind=choice)
+    print(f"[entry] chat={chat_id} choice={choice}", flush=True)
+    await _tg(client, "sendMessage", chat_id=chat_id, text=_ENTRY_PROMPTS[choice])
+    await _tg(client, "answerCallbackQuery", callback_query_id=cq_id)
+
+
 async def _handle_callback(client, cq):
     """Handle an inline button press (callback_query).
     Validates payload strictly — it's an external input. Saves the rating, updates
@@ -951,6 +1014,10 @@ async def _handle_callback(client, cq):
     parts = data.split(":")
     if parts[0] == "tour" and len(parts) == 2:
         await _handle_tour_callback(client, cq_id, chat_id, parts[1])
+        return
+
+    if parts[0] == "entry" and len(parts) == 2 and parts[1] in _ENTRY_PROMPTS:
+        await _handle_entry_callback(client, cq_id, chat_id, message_id, parts[1])
         return
 
     if (len(parts) != 3 or parts[0] != "rate"
