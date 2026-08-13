@@ -210,18 +210,14 @@ def _parse_updated(text):
     return m.group(1) if m else ""
 
 
-def _open_loops_channel(d):
-    """Always-on context: every open loop, score-independent. A loop's status is a
-    code-written machine field (_status: open_), so 'open' is a filter, not a search
-    — these loops compete for no query-scored slot. Done/dropped loops stay
-    query-relevant and ride the normal top-K below. Capped by chars, freshest first:
-    on overflow the older loops collapse into a stub so the model knows the channel
-    was truncated, not exhaustive (silent truncation is exactly the bug we're fixing).
-    Returns (channel_entries, open_paths); open_paths lets _recall_sync skip them in
-    the query pass so an open loop isn't returned twice."""
+def _open_loops(d):
+    """Every open loop, freshest first, as (stamp, relpath, body). A loop's status
+    is a code-written machine field (_status: open_), so 'open' is a filter, not a
+    search. One definition of "open", shared by the model's always-on channel and
+    the human-facing /memory view — they drifted apart once already."""
     loops_dir = d / "loops"
     if not loops_dir.is_dir():
-        return [], set()
+        return []
     open_loops = []
     for p in loops_dir.glob("*.md"):
         try:
@@ -233,6 +229,20 @@ def _open_loops_channel(d):
         if first == "_status: open_":
             open_loops.append((_parse_updated(text), str(p.relative_to(d)), text.strip()))
     open_loops.sort(key=lambda s: s[0], reverse=True)  # freshest first
+    return open_loops
+
+
+def _open_loops_channel(d):
+    """Always-on context: every open loop, score-independent — these loops compete
+    for no query-scored slot. Done/dropped loops stay query-relevant and ride the
+    normal top-K below. Capped by chars, freshest first: on overflow the older loops
+    collapse into a stub so the model knows the channel was truncated, not
+    exhaustive (silent truncation is exactly the bug we're fixing).
+    Returns (channel_entries, open_paths); open_paths lets _recall_sync skip them in
+    the query pass so an open loop isn't returned twice."""
+    open_loops = _open_loops(d)
+    if not open_loops:
+        return [], set()
     out, used, cut = [], 0, 0
     for _stamp, rel, body in open_loops:
         if used + len(body) <= _OPEN_LOOPS_CHAR_CAP:
@@ -367,24 +377,75 @@ def _one(d, name):
     except Exception as exc:
         log.warning("read %s failed: %s", p, exc)
         return ""
-    # drop the internal "_updated: ..." footers for the human-facing /memory view
-    return re.sub(r"\n*_updated: [^\n]*_\n*", "\n\n", text).strip()
+    return _strip_footer(text)
+
+
+# How many entries of one kind /memory shows in full before collapsing the rest
+# into a "…и ещё N". Enough to recognise what the coach is holding, few enough
+# that a long-running profile doesn't answer /memory with a wall of text.
+_SUMMARY_ENTRIES = 5
+
+
+def _strip_footer(text):
+    """Drop the internal machine fields — `_updated:` footer, `_status: open_`
+    header — for the human-facing /memory view."""
+    text = re.sub(r"\n*_updated: [^\n]*_\n*", "\n\n", text)
+    return re.sub(r"^_status: \w+_\n*", "", text.lstrip()).strip()
+
+
+def _recent_entries(d, sub):
+    """Entries of one per-entry type, freshest first, footers stripped."""
+    sd = d / sub
+    if not sd.is_dir():
+        return []
+    out = []
+    for p in sd.glob("*.md"):
+        try:
+            text = _read_text(p)
+        except Exception as exc:
+            log.warning("summarize: unreadable %s: %s", p, exc)
+            continue
+        out.append((_parse_updated(text), _strip_footer(text)))
+    out.sort(key=lambda e: e[0], reverse=True)
+    return [body for _stamp, body in out if body]
+
+
+def _section(title, bodies):
+    """A capped section: the freshest entries in full, the rest as a count."""
+    if not bodies:
+        return []
+    shown = bodies[:_SUMMARY_ENTRIES]
+    block = f"## {title}\n\n" + "\n\n---\n\n".join(shown)
+    extra = len(bodies) - len(shown)
+    if extra:
+        block += f"\n\n_…и ещё {extra} — целиком в /export._"
+    return [block]
 
 
 def _summarize_sync(tenant_id):
     """'/memory': a human-facing view of what the coach currently holds — the
-    stable self, open threads, and counts of the rest. Not the raw file dump
-    (that's /export)."""
+    stable self, the open threads, what it has noticed, and counts of the rest.
+    Not the raw file dump (that's /export).
+
+    Open threads and patterns are shown as text, not tallied: «1 паттернов» is a
+    fact about our filesystem, while the question behind /memory is «что ты про
+    меня понял». Counts stay for the bulk types (sessions, docs), where the
+    number is the honest answer."""
     d = _tenant_dir(tenant_id)
     parts = []
     s = _one(d, "self.md")
     if s:
         parts.append(s)
-    loops = _one(d, "open_loops.md")
-    if loops:
-        parts.append("## Открытые темы\n\n" + loops)
+    # loops/<slug>.md is the live channel; open_loops.md is the legacy single
+    # file, deprecated for writing but still on disk for long-standing tenants.
+    loops = [_strip_footer(body) for _stamp, _rel, body in _open_loops(d)]
+    legacy = _one(d, "open_loops.md")
+    if legacy:
+        loops.append(legacy)
+    parts += _section("Открытые темы", loops)
+    parts += _section("Что я заметил", _recent_entries(d, "patterns"))
     counts = []
-    for sub, label in (("patterns", "паттернов"), ("decisions", "решений"), ("sessions", "сессий"),
+    for sub, label in (("decisions", "решений"), ("sessions", "сессий"),
                        ("tests", "результатов тестов"), ("docs", "документов")):
         sd = d / sub
         n = sum(1 for _ in sd.glob("*.md")) if sd.is_dir() else 0
