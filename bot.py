@@ -946,9 +946,24 @@ async def _handle_inner(client, msg):
                   text="Я понимаю текст, голосовые и PDF. Это пока не возьму.")
 
 
-async def _handle_tour_callback(client, cq_id, chat_id, action):
-    """Handle a tour button press: advance to the next step or exit the tour."""
+async def _drop_keyboard(client, chat_id, message_id):
+    """Take the buttons off a message that has been used up. Best-effort: a
+    failed edit costs nothing here, unlike the entry gate where it guards a log."""
+    try:
+        await _tg(client, "editMessageReplyMarkup", chat_id=chat_id,
+                  message_id=message_id, reply_markup={"inline_keyboard": []})
+    except Exception as exc:
+        print(f"[tour] editMessageReplyMarkup failed: {exc}", flush=True)
+
+
+async def _handle_tour_callback(client, cq_id, chat_id, message_id, action):
+    """Handle a tour button press: advance to the next step or exit the tour.
+
+    Every step is its own message, so without clearing the keyboard the chat is
+    left littered with live «Дальше →» buttons from steps already passed — and
+    the offer on the frames message stays tappable after the tour is over."""
     cid = str(chat_id)
+    await _drop_keyboard(client, chat_id, message_id)
     if action == "exit":
         _contacts.setdefault(cid, {})["tour"] = "done"
         _save_contacts()
@@ -1013,7 +1028,7 @@ async def _handle_callback(client, cq):
 
     parts = data.split(":")
     if parts[0] == "tour" and len(parts) == 2:
-        await _handle_tour_callback(client, cq_id, chat_id, parts[1])
+        await _handle_tour_callback(client, cq_id, chat_id, message_id, parts[1])
         return
 
     if parts[0] == "entry" and len(parts) == 2 and parts[1] in _ENTRY_PROMPTS:

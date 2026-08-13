@@ -263,6 +263,46 @@ async def test_e2e_tour_offered_walked_exited_not_reoffered(tg):
     assert not _tour_offer_buttons(tg), "tour not reoffered after exit"
 
 
+# ── использованная кнопка гаснет ──────────────────────────────────────────────
+
+def _cleared(sent):
+    """message_id'ы, с которых сняли клавиатуру."""
+    return [p["message_id"] for m, p in sent
+            if m == "editMessageReplyMarkup" and not p["reply_markup"]["inline_keyboard"]]
+
+
+async def test_used_tour_button_stops_being_tappable(tg):
+    """Каждый шаг — отдельное сообщение, и без гашения чат остаётся усыпан
+    живыми «Дальше →» от уже пройденных шагов, а оффер «Как это устроено?»
+    жмётся и после конца тура."""
+    await bot._handle_callback(FakeClient(), _cq("0"))
+    assert 42 in _cleared(tg), "оффер должен погаснуть, когда тур начали"
+
+    tg.clear()
+    await bot._handle_callback(FakeClient(), _cq("1"))
+    assert 42 in _cleared(tg), "пройденный шаг не должен остаться кликабельным"
+
+
+async def test_last_step_button_goes_out_on_exit(tg):
+    """«Понятно» — тоже использованная кнопка."""
+    await bot._handle_callback(FakeClient(), _cq("exit"))
+    assert 42 in _cleared(tg), "кнопка выхода должна погаснуть"
+
+
+async def test_tour_survives_a_failed_clear(tg, monkeypatch):
+    """Гашение — best-effort: в отличие от entry, здесь оно ничего не охраняет,
+    поэтому сорвавшийся edit не должен съесть шаг тура."""
+    async def flaky(client, method, **params):
+        if method == "editMessageReplyMarkup":
+            raise RuntimeError("message to edit not found")
+        tg.append((method, params))
+        return {"ok": True}
+    monkeypatch.setattr(bot, "_tg", flaky)
+
+    await bot._handle_callback(FakeClient(), _cq("0"))
+    assert bot._TOUR_STEPS[0] in _sent_texts(tg), "шаг показан несмотря на сбой гашения"
+
+
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _always(text):
