@@ -10,6 +10,7 @@ import asyncio
 import pytest
 
 import bot
+import supervision
 
 
 @pytest.fixture(autouse=True)
@@ -18,6 +19,18 @@ def isolated_store(tmp_path, monkeypatch):
     monkeypatch.setattr(bot, "PRODUCT_STORE_FILE", tmp_path / "contacts.enc")
     bot._contacts.clear()
     bot._feedback_pending.clear()
+
+
+@pytest.fixture(autouse=True)
+def isolated_quality_layer(tmp_path, monkeypatch):
+    """Отзыв живёт в слое качества, а не в продуктовом хранилище — иначе его
+    сносит /delete_my_data вместе со всей строкой человека."""
+    monkeypatch.setattr(supervision, "DB_FILE", tmp_path / "sup.db")
+    supervision.init()
+
+
+def _feedback_texts():
+    return [f["text"] for f in supervision.feedback()]
 
 
 @pytest.fixture
@@ -155,7 +168,7 @@ async def test_feedback_answer_does_not_go_to_brain(tg, monkeypatch):
                        "text": "Очень полезно, спасибо"})
 
     assert buf == [], "feedback answer must not be buffered for the brain"
-    assert bot._contacts["1"]["feedback"] == "Очень полезно, спасибо"
+    assert _feedback_texts() == ["Очень полезно, спасибо"]
     assert 1 not in bot._feedback_pending
     assert any(p.get("text") == bot.FEEDBACK_THANKS
                for m, p in tg if m == "sendMessage"), "person is thanked"
@@ -176,7 +189,7 @@ async def test_voice_feedback_is_transcribed_and_captured(tg, monkeypatch):
                       {"chat": {"id": 42}, "message_id": 1,
                        "voice": {"file_id": "v1"}})
 
-    assert bot._contacts["42"]["feedback"] == "Отлично, прям попало"
+    assert _feedback_texts() == ["Отлично, прям попало"]
     assert 42 not in bot._feedback_pending
     assert any(p.get("text", "").startswith("🎙") for m, p in tg
                if m == "sendMessage"), "transcription is echoed"
@@ -254,13 +267,18 @@ async def test_question_not_repeated_after_restart(tg, monkeypatch):
 # ── /delete_my_data cleans up ────────────────────────────────────────────────
 
 
-async def test_delete_clears_feedback_marker_and_answer(tg, monkeypatch):
-    bot._contacts["42"] = {
-        "feedback_asked": True, "turn_count": 3,
-        "feedback": "супер коуч",
-    }
+async def test_delete_clears_the_marker_but_keeps_the_отзыв(tg, monkeypatch):
+    """Решение 14.08.2026: отзыв переживает удаление вместе с chat_id.
+
+    Это показание о сервисе, данное добровольно в ответ на наш вопрос, а не
+    часть удаляемого разговора; отзыв, который нельзя возвести к живому
+    аккаунту, не работает как доказательство, что мы его не сочинили. Уходит
+    маршрутная пометка «уже спрашивали» — она про человека, не про сервис.
+    /privacy обязан говорить это прямо, см. test_product_store."""
+    bot._contacts["42"] = {"feedback_asked": True, "turn_count": 3}
     bot._save_contacts()
     bot._feedback_pending.add(42)
+    supervision.save_feedback(bot._tenant_id_for(42), 42, "супер коуч")
 
     async def fake_delete(tenant_id):
         return True
@@ -270,8 +288,10 @@ async def test_delete_clears_feedback_marker_and_answer(tg, monkeypatch):
 
     assert "42" not in bot._contacts, "contact entry removed"
     assert 42 not in bot._feedback_pending, "pending flag cleared"
-
-    # Reload from disk — gone there too.
     bot._contacts.clear()
     bot._load_contacts()
-    assert "42" not in bot._contacts, "feedback data gone from disk"
+    assert "42" not in bot._contacts, "routing state gone from disk"
+
+    kept = supervision.feedback()
+    assert [f["text"] for f in kept] == ["супер коуч"], "отзыв переживает удаление"
+    assert kept[0]["chat_id"] == "42", "и остаётся возводимым к аккаунту"

@@ -81,6 +81,19 @@ CREATE TABLE IF NOT EXISTS ratings (
     rating   TEXT NOT NULL           -- scale value: hit / partial / miss
 );
 CREATE INDEX IF NOT EXISTS idx_ratings_turn_id ON ratings(turn_id);
+
+-- What a person said about the service itself, asked once by the bot after the
+-- FEEDBACK_AFTER_TURN-th turn. Not a coaching turn and not a personal fact: it
+-- is testimony about the product, given voluntarily in answer to our question.
+-- chat_id is stored raw and on purpose — an отзыв that cannot be traced to a
+-- real account is worth nothing as proof that we did not write it ourselves.
+CREATE TABLE IF NOT EXISTS feedback (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts       REAL NOT NULL,
+    tenant   TEXT NOT NULL,
+    chat_id  TEXT NOT NULL,
+    text     BLOB NOT NULL           -- Fernet(text) or plain, like case payloads
+);
 """
 
 
@@ -305,7 +318,10 @@ def mark_reviewed(case_id, verdict):
 def purge(days=RETENTION_DAYS):
     """Drop cases and passes past retention, plus the ratings that went with
     them. A rating whose case is gone is unreadable anyway — «мимо» means
-    nothing without the trace it points at — so it must not outlive it."""
+    nothing without the trace it points at — so it must not outlive it.
+
+    Отзывы are not on retention: they are evidence, and evidence that expires
+    after 90 days is not evidence."""
     cutoff = int(time.time() // 86400) - days
     with _conn() as c:
         cur = c.execute("DELETE FROM cases WHERE day < ?", (cutoff,))
@@ -333,6 +349,12 @@ def forget_tenant(tenant):
     not a personal fact, and it is the only prospective signal we have about
     where the coach is wrong. Keeping it costs the person nothing: it no longer
     contains their words and no longer points at them.
+
+    The `feedback` table is untouched on purpose. An отзыв is testimony about
+    the service, given voluntarily in answer to our question — not part of the
+    разговор being deleted — and it keeps its chat_id, or it stops working as
+    proof that we did not invent it. /privacy says so in as many words; if that
+    ever stops being true there, this has to change with it.
 
     Returns how many rows were anonymised. Never raises — deletion must not fail
     because the quality layer had a bad day."""
@@ -411,6 +433,42 @@ def save_rating(tenant, turn_id, rating):
             )
     except Exception as exc:
         print("[supervision] save_rating error:", exc, flush=True)
+
+
+def save_feedback(tenant, chat_id, text):
+    """Store an answer to the product question. Never raises.
+
+    Lives here, not in the bot's product store, for one reason: the store is
+    popped wholesale by /delete_my_data, and an отзыв that disappears the moment
+    someone clears their разговоры is useless as evidence that the отзывы are
+    real. Deliberately outside forget_tenant and outside purge — see both."""
+    try:
+        blob = text.encode("utf-8")
+        f = _fernet()
+        if f:
+            blob = f.encrypt(blob)
+        with _conn() as c:
+            c.execute("INSERT INTO feedback (ts, tenant, chat_id, text) VALUES (?, ?, ?, ?)",
+                      (time.time(), tenant, str(chat_id), blob))
+    except Exception as exc:
+        print("[supervision] save_feedback error:", exc, flush=True)
+
+
+def feedback(limit=100):
+    """Collected отзывы, freshest first — for reading them, not for the critic."""
+    f = _fernet()
+    with _conn() as c:
+        rows = c.execute("SELECT ts, chat_id, text FROM feedback "
+                         "ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
+    out = []
+    for ts, chat_id, blob in rows:
+        try:
+            text = (f.decrypt(blob) if f else blob).decode("utf-8")
+        except Exception as exc:
+            print("[supervision] feedback decode error:", exc, flush=True)
+            continue
+        out.append({"ts": ts, "chat_id": chat_id, "text": text})
+    return out
 
 
 def get_rating(turn_id):

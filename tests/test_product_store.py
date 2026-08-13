@@ -91,6 +91,18 @@ async def test_privacy_notice_answers_the_reader_not_our_processing(tg):
     assert "анонимно" in text
 
 
+async def test_privacy_notice_says_the_отзыв_outlives_deletion(tg):
+    """Отзыв переживает /delete_my_data и сохраняет chat_id (решение 14.08.2026).
+    Пока это так, текст обязан это говорить: обещание «без связи с тобой» здесь
+    стало бы прямой ложью, а расхождение обещания с кодом — ровно тот провал,
+    за который в этой индустрии бьют больнее всего."""
+    await bot._command(FakeClient(), 42, "/privacy")
+
+    text = " ".join(params["text"] for method, params in tg if method == "sendMessage")
+    assert "отзыв" in text.lower(), "остающийся отзыв должен быть назван прямо"
+    assert "без связи с тобой" not in text, "это перестало быть правдой"
+
+
 async def test_privacy_notice_does_not_promise_a_psychologist(tg):
     """CONTRIBUTING.md refuses changes that promise clinical effect, and the
     first screen disclaims replacing a psychotherapist two taps earlier —

@@ -254,6 +254,46 @@ def test_delete_keeps_the_rating_and_its_trace(db):
     assert reasons
 
 
+def test_delete_keeps_the_отзыв_with_its_chat_id(db):
+    """Решение 14.08.2026, отдельное от оценок: отзыв о сервисе переживает
+    удаление НЕ обезличенным. Это добровольное показание о продукте, а не часть
+    разговора, и отзыв, который нельзя возвести к живому аккаунту, не работает
+    как доказательство, что мы его не сочинили сами."""
+    supervision.save_feedback("alice", 588259993, "кнопки удобные, тур длинноват")
+
+    supervision.forget_tenant("alice")
+
+    kept = supervision.feedback()
+    assert [f["text"] for f in kept] == ["кнопки удобные, тур длинноват"]
+    assert kept[0]["chat_id"] == "588259993", "связь с аккаунтом сохраняется намеренно"
+
+
+def test_отзыв_is_not_on_retention(db):
+    """Доказательство, которое протухает через 90 дней, — не доказательство."""
+    supervision.save_feedback("alice", 1, "очень помогло")
+    with supervision._conn() as c:
+        c.execute("UPDATE feedback SET ts = 0")
+
+    supervision.purge()
+
+    assert [f["text"] for f in supervision.feedback()] == ["очень помогло"]
+
+
+def test_отзыв_is_encrypted_at_rest(db, monkeypatch):
+    """Свободный текст: человек напишет туда что угодно, включая своё. Лежит
+    под тем же ключом, что и содержимое разборов."""
+    from cryptography.fernet import Fernet
+    key = Fernet.generate_key()
+    monkeypatch.setenv("MEMORY_ENCRYPTION_KEY", key.decode())
+
+    supervision.save_feedback("alice", 1, "секретное слово")
+
+    with supervision._conn() as c:
+        blob = c.execute("SELECT text FROM feedback").fetchone()[0]
+    assert "секретное слово" not in blob.decode("utf-8", "ignore")
+    assert [f["text"] for f in supervision.feedback()] == ["секретное слово"]
+
+
 def test_delete_leaves_other_people_alone(db):
     supervision.capture("alice", "a" * 900, "b", budget_exhausted=True, turn_id="t1")
     supervision.capture("bob", "c" * 900, "d", budget_exhausted=True, turn_id="t2")

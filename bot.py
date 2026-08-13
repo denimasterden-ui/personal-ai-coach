@@ -418,11 +418,14 @@ async def _maybe_ask_feedback(client, chat_id):
 async def _capture_feedback(client, chat_id, text):
     """Store the feedback answer and thank the person. The answer does NOT go to
     the brain and does NOT enter the extraction pass — it's a fact about the
-    product (ADR 0004), kept in the product store, purged by /delete_my_data."""
-    cid = str(chat_id)
-    _contacts.setdefault(cid, {})["feedback"] = text
-    _save_contacts()
-    analytics.log("feedback", _tenant_id_for(chat_id))
+    product (ADR 0004).
+
+    It lives in the quality layer, not in the product store: the store is popped
+    wholesale by /delete_my_data, and an отзыв that vanishes when someone clears
+    their разговоры is worthless as proof that the отзывы are real people's."""
+    tenant = _tenant_id_for(chat_id)
+    await asyncio.to_thread(supervision.save_feedback, tenant, chat_id, text)
+    analytics.log("feedback", tenant)
     await _tg(client, "sendMessage", chat_id=chat_id, text=FEEDBACK_THANKS)
     print(f"[feedback] captured {len(text)} chars from chat={chat_id}", flush=True)
 
@@ -641,8 +644,8 @@ PRIVACY_NOTICE = (
     "соответствие и ошибки — так он становится лучше.\n\n"
     "Ничего не продаётся и никому не передаётся. Рекламы здесь нет.\n\n"
     "Забрать и стереть — в один шаг: /export отдаст всё файлом, "
-    "/delete_my_data сотрёт разговоры без копий. Останется обезличенная "
-    "пометка «попал / мимо» — без текста и без связи с тобой.\n\n"
+    "/delete_my_data сотрёт разговоры без копий. Остаётся только сказанное о "
+    "самом сервисе: оценки разборов и отзыв, если ты его оставлял.\n\n"
     "Хочешь, чтобы всё крутилось только у тебя, — код открыт:\n"
     "github.com/denimasterden-ui/personal-ai-coach"
 )

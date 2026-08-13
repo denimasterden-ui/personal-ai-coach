@@ -214,6 +214,10 @@ async def test_first_session_journey(chat, monkeypatch):
     assert all(t == supervision.DELETED_TENANT for t in tenants), "кейсы обезличены"
     assert ratings == ["miss"], "урок остаётся: оценка пережила удаление"
     assert str(CHAT) not in bot._contacts, "продуктовое хранилище тоже забывает"
+    kept = supervision.feedback()
+    assert [f["text"] for f in kept] == ["кнопки удобные, тур длинноват"], (
+        "отзыв о сервисе — показание о продукте, а не часть удаляемого разговора")
+    assert kept[0]["chat_id"] == str(CHAT), "и остаётся возводимым к аккаунту"
 
     # ⑨ возврат: встречают как впервые
     chat.messages.clear()

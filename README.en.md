@@ -132,6 +132,10 @@ Your first message to the bot returns your `chat_id` — put it in `ALLOWED_CHAT
   partly / off) and the turn's trace — which tools the coach called, how much `recall` found —
   with no text and no link to the person. That's product experience rather than a personal fact,
   and it's the only signal we have about where the coach gets things wrong.
+- Separately: the **service feedback** (the bot asks once, after the third turn) does survive
+  deletion, and keeps its `chat_id`. It's voluntary testimony about the product rather than part
+  of the conversation being deleted — and a review that can't be traced to a real account is
+  worthless as proof the operator didn't write it. The `/privacy` text says so plainly.
 - The only outbound traffic is the request to the model you chose. Want **nothing** to leave the
   machine — plug in a local model (Ollama) in `.env`.
 - `chat_id` whitelist: in private mode (the default) the bot answers only the allowed chat.
