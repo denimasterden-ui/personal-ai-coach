@@ -1,0 +1,27 @@
+# Гоняет сьют на каждый push и PR. Заведён после того, как «238 зелёных» два дня
+# подряд было словом человека, а не фактом: PR показывал mergeable=CLEAN, что
+# говорит только об отсутствии конфликтов слияния и ничего — о тестах.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - run: pip install -r requirements-dev.txt
+
+      # Секреты не нужны: tests/conftest.py подставляет заглушки для всего,
+      # что модули читают из окружения при импорте. Сеть в тестах не трогается —
+      # ни модели, ни Telegram, ни диска вне tmp_path.
+      - run: pytest
