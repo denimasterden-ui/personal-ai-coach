@@ -303,6 +303,40 @@ async def test_tour_survives_a_failed_clear(tg, monkeypatch):
     assert bot._TOUR_STEPS[0] in _sent_texts(tg), "шаг показан несмотря на сбой гашения"
 
 
+# ── тур виден в аналитике, а не только в журнале ─────────────────────────────
+
+@pytest.fixture
+def events(monkeypatch):
+    """Перехват analytics.log — поверх заглушки фикстуры tg."""
+    got = []
+    monkeypatch.setattr(bot.analytics, "log",
+                        lambda event, tenant, **kw: got.append((event, kw.get("kind"))))
+    return got
+
+
+async def test_each_tour_step_is_counted(tg, events):
+    """До сих пор шаги тура жили только в systemd-журнале, который ротируется:
+    двоих из четырёх новых после релиза тур съел до первого слова, и узнали
+    мы это случайно. Воронка тура должна считаться там же, где когорты."""
+    await bot._handle_callback(FakeClient(), _cq("0"))
+    await bot._handle_callback(FakeClient(), _cq("1"))
+
+    assert ("tour_step", "0") in events and ("tour_step", "1") in events
+
+
+async def test_tour_exit_is_counted(tg, events):
+    """«Хватит» на первом шаге = tour_step 0, затем tour_exit без шага 1."""
+    await bot._handle_callback(FakeClient(), _cq("exit"))
+    assert ("tour_exit", None) in events
+
+
+async def test_stale_step_after_done_is_not_counted(tg, events):
+    """Залипшая кнопка после выхода не должна накручивать воронку."""
+    bot._contacts["7"] = {"tour": "done"}
+    await bot._handle_callback(FakeClient(), _cq("1"))
+    assert not [e for e in events if e[0] == "tour_step"]
+
+
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _always(text):

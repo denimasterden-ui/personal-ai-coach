@@ -165,21 +165,35 @@ def _save_contacts() -> None:
 # as a separate message, whether the product was useful. The answer is about the
 # product, not about the person, so it must never enter the brain as a turn or
 # reach the extraction pass (ADR 0004 rule 1). Asked exactly once: the
-# feedback_asked marker persists in the product store; on restart the person who
-# hasn't answered yet just continues talking normally.
+# feedback_asked marker persists in the product store.
+#
+# The question carries buttons and does NOT capture the next message by itself.
+# It used to, and in prod (23.09) a person mid-flow sent a fourth voice note
+# right after the third разбор — the bot took four and a half thousand
+# characters of her situation for a product review, thanked her, and she never
+# got the разбор. Someone in the middle of their story doesn't read the
+# question; only an explicit «Написать» turns the next message into feedback.
 FEEDBACK_AFTER_TURN = 3
 
-FEEDBACK_QUESTION = (
-    "Как тебе вообще — полезно ли?\n\n"
-    "Расскажи своими словами, что зашло, а что нет. "
-    "Можно голосовым — я расшифрую."
-)
+FEEDBACK_QUESTION = "Как тебе вообще — полезно ли?"
+
+_FEEDBACK_CHOICES = {"useful": "Полезно", "meh": "Не очень"}
+
+FEEDBACK_WRITE_PROMPT = "Напиши или наговори, что зашло, а что нет, — передам как есть."
 
 FEEDBACK_THANKS = "Спасибо за обратную связь."
 
-# chat_ids whose next text/voice message is the feedback answer (not a turn).
-# Ephemeral: a restart clears it — the question was already asked (feedback_asked
-# persists), so it won't be repeated, and conversation continues without it.
+
+def _feedback_keyboard():
+    return {"inline_keyboard": [[
+        {"text": "Полезно", "callback_data": "fb:useful"},
+        {"text": "Не очень", "callback_data": "fb:meh"},
+        {"text": "Написать", "callback_data": "fb:write"},
+    ]]}
+
+# chat_ids that pressed «Написать»: their next text/voice message is the
+# feedback answer (not a turn). Ephemeral: a restart clears it, and the person
+# just continues talking normally.
 _feedback_pending: set[int] = set()
 
 
@@ -407,10 +421,10 @@ async def _maybe_ask_feedback(client, chat_id):
     ask = count == FEEDBACK_AFTER_TURN and not entry.get("feedback_asked")
     if ask:
         entry["feedback_asked"] = True
-        _feedback_pending.add(chat_id)
     _save_contacts()
     if ask:
-        await _tg(client, "sendMessage", chat_id=chat_id, text=FEEDBACK_QUESTION)
+        await _tg(client, "sendMessage", chat_id=chat_id, text=FEEDBACK_QUESTION,
+                  reply_markup=_feedback_keyboard())
         analytics.log("feedback_asked", _tenant_id_for(chat_id))
         print(f"[feedback] asked chat={chat_id}", flush=True)
 
@@ -425,9 +439,27 @@ async def _capture_feedback(client, chat_id, text):
     their разговоры is worthless as proof that the отзывы are real people's."""
     tenant = _tenant_id_for(chat_id)
     await asyncio.to_thread(supervision.save_feedback, tenant, chat_id, text)
-    analytics.log("feedback", tenant)
+    analytics.log("feedback", tenant, kind="text")
     await _tg(client, "sendMessage", chat_id=chat_id, text=FEEDBACK_THANKS)
     print(f"[feedback] captured {len(text)} chars from chat={chat_id}", flush=True)
+
+
+async def _handle_feedback_callback(client, cq_id, chat_id, message_id, choice):
+    """A tap under the feedback question. «Полезно» / «Не очень» are recorded as
+    they are; «Написать» is the only thing that makes the next message feedback
+    instead of a turn. Never calls the brain."""
+    await _drop_keyboard(client, chat_id, message_id)
+    if choice == "write":
+        _feedback_pending.add(chat_id)
+        await _tg(client, "sendMessage", chat_id=chat_id, text=FEEDBACK_WRITE_PROMPT)
+        await _tg(client, "answerCallbackQuery", callback_query_id=cq_id)
+        return
+    tenant = _tenant_id_for(chat_id)
+    await asyncio.to_thread(supervision.save_feedback, tenant, chat_id,
+                            _FEEDBACK_CHOICES[choice])
+    analytics.log("feedback", tenant, kind=choice)
+    print(f"[feedback] tap {choice} from chat={chat_id}", flush=True)
+    await _tg(client, "answerCallbackQuery", callback_query_id=cq_id, text="Спасибо!")
 
 
 # Per-chat serial worker (the "followup" queue pattern). A person often sends a
@@ -956,7 +988,7 @@ async def _drop_keyboard(client, chat_id, message_id):
         await _tg(client, "editMessageReplyMarkup", chat_id=chat_id,
                   message_id=message_id, reply_markup={"inline_keyboard": []})
     except Exception as exc:
-        print(f"[tour] editMessageReplyMarkup failed: {exc}", flush=True)
+        print(f"[keyboard] editMessageReplyMarkup failed: {exc}", flush=True)
 
 
 async def _handle_tour_callback(client, cq_id, chat_id, message_id, action):
@@ -970,6 +1002,7 @@ async def _handle_tour_callback(client, cq_id, chat_id, message_id, action):
     if action == "exit":
         _contacts.setdefault(cid, {})["tour"] = "done"
         _save_contacts()
+        analytics.log("tour_exit", _tenant_id_for(chat_id))
         print(f"[tour] chat={chat_id} done", flush=True)
         await _tg(client, "answerCallbackQuery", callback_query_id=cq_id,
                   text="Возвращаемся к разговору")
@@ -989,6 +1022,10 @@ async def _handle_tour_callback(client, cq_id, chat_id, message_id, action):
         await _tg(client, "answerCallbackQuery", callback_query_id=cq_id)
         return
 
+    # Counted where the cohorts are, not only in the rotating systemd journal:
+    # the tour is a funnel step, and after the release two of four newcomers
+    # spent their attention on it and left before a single word.
+    analytics.log("tour_step", _tenant_id_for(chat_id), kind=str(step))
     print(f"[tour] chat={chat_id} step={step}", flush=True)
     await _tg(client, "sendMessage", chat_id=chat_id,
               text=_TOUR_STEPS[step], reply_markup=_tour_nav_keyboard(step))
@@ -1036,6 +1073,10 @@ async def _handle_callback(client, cq):
 
     if parts[0] == "entry" and len(parts) == 2 and parts[1] in _ENTRY_PROMPTS:
         await _handle_entry_callback(client, cq_id, chat_id, message_id, parts[1])
+        return
+
+    if parts[0] == "fb" and len(parts) == 2 and parts[1] in (*_FEEDBACK_CHOICES, "write"):
+        await _handle_feedback_callback(client, cq_id, chat_id, message_id, parts[1])
         return
 
     if (len(parts) != 3 or parts[0] != "rate"

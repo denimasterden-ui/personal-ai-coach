@@ -78,6 +78,26 @@ def _count_questions(sent):
                if m == "sendMessage" and p.get("text") == bot.FEEDBACK_QUESTION)
 
 
+def _question_buttons(sent):
+    """callback_data кнопок под вопросом об отзыве."""
+    for m, p in sent:
+        if m == "sendMessage" and p.get("text") == bot.FEEDBACK_QUESTION:
+            return [b["callback_data"] for row in p["reply_markup"]["inline_keyboard"]
+                    for b in row]
+    return []
+
+
+def _fb_cq(choice, chat_id=1):
+    return {"id": "cq", "from": {"id": chat_id},
+            "message": {"chat": {"id": chat_id}, "message_id": 77},
+            "data": f"fb:{choice}"}
+
+
+def _cleared(sent):
+    return [p for m, p in sent if m == "editMessageReplyMarkup"
+            and not p["reply_markup"]["inline_keyboard"]]
+
+
 def _capture_turn(sink):
     async def _f(client, tenant, session, text, model=None, turn_id=None,
                  light_intro=False):
@@ -130,7 +150,69 @@ async def test_question_asked_after_third_turn(tg, monkeypatch):
     turns = await _run_turns(monkeypatch, 1, 3)
     assert len(turns) == 3
     assert _count_questions(tg) == 1, "feedback question asked after the 3rd turn"
-    assert 1 in bot._feedback_pending
+    assert set(_question_buttons(tg)) == {"fb:useful", "fb:meh", "fb:write"}
+
+
+async def test_asking_does_not_hijack_the_next_message(tg, monkeypatch):
+    """Прод, 23.09: человек в потоке наговорил четвёртое голосовое после
+    третьего разбора — бот принял его за отзыв, записал «спасибо за обратную
+    связь», и разбора она так и не получила. Вопрос с кнопками не должен
+    перехватывать следующее сообщение: оно — ход, пока человек сам не нажал
+    «Написать»."""
+    await _run_turns(monkeypatch, 1, 3)
+    buf = []
+    monkeypatch.setattr(bot, "_buffer", lambda *a, **kw: buf.append(a))
+
+    await bot._handle(FakeClient(), {"chat": {"id": 1}, "message_id": 99,
+                                     "text": "и вот ещё что меня триггерит…"})
+
+    assert len(buf) == 1, "продолжение потока уходит коучу как ход"
+    assert _feedback_texts() == [], "и не записывается как отзыв"
+
+
+async def test_voice_after_question_is_a_turn_too(tg, monkeypatch):
+    """Голосом — ровно сценарий 23.09."""
+    await _run_turns(monkeypatch, 42, 3)
+    buf = []
+    monkeypatch.setattr(bot, "_buffer", lambda *a, **kw: buf.append(a))
+
+    async def fake_transcribe(client, audio):
+        return "продолжаю, смотри, что было дальше"
+    monkeypatch.setattr(bot, "_transcribe", fake_transcribe)
+
+    await bot._handle(FakeClient(), {"chat": {"id": 42}, "message_id": 1,
+                                     "voice": {"file_id": "v1"}})
+
+    assert len(buf) == 1 and _feedback_texts() == []
+
+
+# ── кнопки ответа ───────────────────────────────────────────────────────────
+
+
+async def test_useful_tap_is_recorded_without_touching_the_brain(tg, monkeypatch):
+    await _run_turns(monkeypatch, 1, 3)
+    brain = []
+    monkeypatch.setattr(bot, "_ask_brain", _capture_turn(brain))
+
+    await bot._handle_callback(FakeClient(), _fb_cq("useful"))
+
+    assert _feedback_texts() == ["Полезно"]
+    assert brain == [], "тап — не ход"
+    assert 1 not in bot._feedback_pending
+    assert _cleared(tg), "использованные кнопки гаснут"
+
+
+async def test_meh_tap_is_recorded(tg, monkeypatch):
+    await _run_turns(monkeypatch, 1, 3)
+    await bot._handle_callback(FakeClient(), _fb_cq("meh"))
+    assert _feedback_texts() == ["Не очень"]
+
+
+async def test_unknown_fb_payload_is_ignored(tg, monkeypatch):
+    """callback_data — внешний ввод."""
+    await _run_turns(monkeypatch, 1, 3)
+    await bot._handle_callback(FakeClient(), _fb_cq("drop table"))
+    assert _feedback_texts() == [] and 1 not in bot._feedback_pending
 
 
 async def test_question_asked_exactly_once(tg, monkeypatch):
@@ -152,11 +234,13 @@ async def test_question_asked_exactly_once(tg, monkeypatch):
 
 
 async def test_feedback_answer_does_not_go_to_brain(tg, monkeypatch):
-    """The core acceptance test: the answer is captured as product feedback and
-    never buffered as a turn — otherwise it enters the brain and the extraction
-    pass, and a product opinion settles in memory as a fact about the person."""
+    """После «Написать» следующее сообщение — отзыв: не буферизуется как ход,
+    иначе мнение о продукте осядет в памяти фактом о человеке."""
     await _run_turns(monkeypatch, 1, 3)
+    await bot._handle_callback(FakeClient(), _fb_cq("write"))
     assert 1 in bot._feedback_pending
+    assert any(p.get("text") == bot.FEEDBACK_WRITE_PROMPT
+               for m, p in tg if m == "sendMessage"), "приглашение написать"
 
     # Spy on _buffer only AFTER the 3 turns, to prove the feedback answer never
     # enters the brain path.
@@ -179,6 +263,7 @@ async def test_feedback_answer_does_not_go_to_brain(tg, monkeypatch):
 
 async def test_voice_feedback_is_transcribed_and_captured(tg, monkeypatch):
     await _run_turns(monkeypatch, 42, 3)
+    await bot._handle_callback(FakeClient(), _fb_cq("write", chat_id=42))
     assert 42 in bot._feedback_pending
 
     async def fake_transcribe(client, audio):
