@@ -173,9 +173,18 @@ async def test_first_session_journey(chat, monkeypatch):
     rate_buttons = [b for b in chat.live_buttons() if b.startswith("rate:")]
     assert len(rate_buttons) == 3 * bot.FEEDBACK_AFTER_TURN, "оценки живут под каждым разбором"
     assert bot.FEEDBACK_QUESTION in chat.texts(), "после третьего хода спрашиваем о продукте"
-    assert CHAT in bot._feedback_pending
+    assert {"fb:useful", "fb:meh", "fb:write"} <= set(chat.live_buttons())
 
-    # ⑤ ответ на вопрос о продукте не уходит коучу
+    # ④½ человек в потоке не читает вопрос и продолжает рассказывать — это ход.
+    # Прод, 23.09: четвёртое голосовое было принято за отзыв, и разбора не было.
+    monkeypatch.setattr(bot, "_ask_brain", _brain("Разбор продолжения."))
+    await _msg("и вот что было дальше…")
+    assert "Разбор продолжения." in chat.texts(), "продолжение потока доходит до коуча"
+    assert bot.FEEDBACK_THANKS not in chat.texts(), "и не принимается за отзыв"
+
+    # ⑤ отзыв — только по явному «Написать», и тогда он не уходит коучу
+    await _tap("fb:write", _mid_of(chat, bot.FEEDBACK_QUESTION))
+    assert not [b for b in chat.live_buttons() if b.startswith("fb:")], "кнопки вопроса погасли"
     monkeypatch.setattr(bot, "_ask_brain", _brain("ЭТОГО РАЗБОРА БЫТЬ НЕ ДОЛЖНО"))
     await _msg("кнопки удобные, тур длинноват")
     assert "ЭТОГО РАЗБОРА БЫТЬ НЕ ДОЛЖНО" not in chat.texts()
